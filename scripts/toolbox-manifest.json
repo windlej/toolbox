@@ -1,0 +1,219 @@
+{
+  "scripts": {
+    "scripts/powershell/active-directory/AD-GroupMembershipAudit.ps1": {
+      "description": "Audits AD group memberships with recursive expansion, disabled user filtering, and HTML/CSV report output.",
+      "notes": "ReportPath defaults to current directory. Use -GroupNames for targeted audits or -GroupNameFilter for wildcard.",
+      "examples": ".\"AD-GroupMembershipAudit.ps1\" -GroupNameFilter \"Domain Admins\" -Recursive -IncludeDisabledUsers"
+    },
+    "scripts/powershell/active-directory/AD-StaleComputerCleanup.ps1": {
+      "description": "Finds stale computer accounts inactive for N days and optionally disables or deletes them.",
+      "notes": "Defaults to 90 days inactivity. Use -WhatIf to preview before making changes.",
+      "examples": ".\"AD-StaleComputerCleanup.ps1\" -InactiveDays 60 -DisableComputers -WhatIf"
+    },
+    "scripts/powershell/active-directory/DomainHealthCheck.ps1": {
+      "description": "Runs AD domain health checks including dcdiag, replication status, FSMO roles, and time sync.",
+      "notes": "Can skip dcdiag or replication checks individually. Targets all DCs by default.",
+      "examples": ".\"DomainHealthCheck.ps1\" -DomainControllers \"DC01\",\"DC02\""
+    },
+    "scripts/powershell/active-directory/GPO-BackupExport.ps1": {
+      "description": "Exports and backs up Group Policy Objects to a specified folder with optional XML reports.",
+      "notes": "BackupPath defaults to a timestamped folder. Use -GpoDisplayNames for targeted exports.",
+      "examples": ".\"GPO-BackupExport.ps1\" -BackupPath \"C:\\GPOBackups\\2024\" -IncludeXmlReport"
+    },
+    "scripts/powershell/active-directory/OU-StructureDoc.ps1": {
+      "description": "Documents Active Directory OU hierarchy with counts of computers, users, groups, and child OUs.",
+      "notes": "Starts from a specified OU path or the domain root. Outputs HTML and optional CSV.",
+      "examples": ".\"OU-StructureDoc.ps1\" -OuPath \"OU=Servers,DC=contoso,DC=com\""
+    },
+    "scripts/powershell/active-directory/PasswordPolicyChecker.ps1": {
+      "description": "Audits AD password policies including fine-grained password policies and user password age.",
+      "notes": "Can audit all users for password age compliance with warning/critical thresholds.",
+      "examples": ".\"PasswordPolicyChecker.ps1\" -AuditUsers -PasswordAgeWarningDays 60 -PasswordAgeCriticalDays 90"
+    },
+    "scripts/powershell/active-directory/PrivilegedAccountMonitor.ps1": {
+      "description": "Monitors privileged AD group memberships with optional baseline comparison for change detection.",
+      "notes": "Use -UpdateBaseline to capture current state, then -CompareWithBaseline on subsequent runs.",
+      "examples": ".\"PrivilegedAccountMonitor.ps1\" -UpdateBaseline"
+    },
+    "scripts/powershell/azure/AzureADConnectHealthCheck.ps1": {
+      "description": "Checks Azure AD Connect sync health, including last sync time, errors, and warning flags.",
+      "notes": "Requires Az.Accounts module. Use -SkipAzConnect if already connected.",
+      "examples": ".\"AzureADConnectHealthCheck.ps1\""
+    },
+    "scripts/powershell/azure/AzureBackupComplianceCheck.ps1": {
+      "description": "Audits Azure VM backup configuration to identify VMs without proper backup protection.",
+      "notes": "Checks all subscriptions by default. Use -SubscriptionIds to scope down.",
+      "examples": ".\"AzureBackupComplianceCheck.ps1\" -SubscriptionIds $subId"
+    },
+    "scripts/powershell/azure/AzureVMInventoryCostEstimator.ps1": {
+      "description": "Inventories Azure VMs across subscriptions and estimates monthly running costs by VM size.",
+      "notes": "Cost estimates are based on standard PAYG rates. Outputs HTML report with cost breakdown.",
+      "examples": ".\"AzureVMInventoryCostEstimator.ps1\" -SubscriptionIds $subId"
+    },
+    "scripts/powershell/azure/AzureVMAutoShutdownScheduler.ps1": {
+      "description": "Audits and optionally applies auto-shutdown schedules to Azure VMs to reduce costs.",
+      "notes": "Use -ApplySchedules to tag unscheduled VMs with a default shutdown time. Supports -WhatIf.",
+      "examples": ".\"AzureVMAutoShutdownScheduler.ps1\" -ApplySchedules -DefaultShutdownTime \"18:00\" -WhatIf"
+    },
+    "scripts/powershell/azure/NSGAudit.ps1": {
+      "description": "Audits Azure Network Security Group rules for high-risk configurations like any-to-any or wide-open ports.",
+      "notes": "Use -FlagHighRiskOnly to show only risky rules. Includes default rules unless -IncludeDefaultRules is set.",
+      "examples": ".\"NSGAudit.ps1\" -FlagHighRiskOnly"
+    },
+    "scripts/powershell/azure/RBACAuditScript.ps1": {
+      "description": "Audits Azure RBAC role assignments across subscriptions, highlighting privileged roles.",
+      "notes": "Flags Owner, Contributor, and User Access Administrator by default. Customize with -PrivilegedRoles.",
+      "examples": ".\"RBACAuditScript.ps1\" -PrivilegedRoles \"Owner\",\"Contributor\""
+    },
+    "scripts/powershell/azure/ResourceTaggingEnforcement.ps1": {
+      "description": "Audits and enforces required tags on Azure resources across subscriptions.",
+      "notes": "-RequiredTags is mandatory. Use -ApplyTags to add missing tags, -WhatIf to preview.",
+      "examples": ".\"ResourceTaggingEnforcement.ps1\" -RequiredTags \"Environment\",\"CostCenter\" -ApplyTags -WhatIf"
+    },
+    "scripts/powershell/azure/StorageAccountPublicExposureCheck.ps1": {
+      "description": "Scans Azure storage accounts for public network access, anonymous blob access, and firewall misconfigurations.",
+      "notes": "Checks all subscriptions by default. Generates HTML report with risk ratings.",
+      "examples": ".\"StorageAccountPublicExposureCheck.ps1\""
+    },
+    "scripts/powershell/azure/SubscriptionAuditReport.ps1": {
+      "description": "Generates a comprehensive audit report of Azure subscriptions including RBAC, resources, and optional cost data.",
+      "notes": "Set -IncludeSpending to pull cost data (requires additional permissions).",
+      "examples": ".\"SubscriptionAuditReport.ps1\" -IncludeSpending"
+    },
+    "scripts/powershell/exchange/ForwardingRuleDetection.ps1": {
+      "description": "Detects and optionally removes mailbox forwarding rules and inbox rule forwarding in Exchange Online.",
+      "notes": "Separate switches for mailbox-level forwarding and inbox rule forwarding. -WhatIf to preview removals.",
+      "examples": ".\"ForwardingRuleDetection.ps1\" -DetectMailboxForwarding -DetectInboxRuleForwarding"
+    },
+    "scripts/powershell/exchange/InboxRuleExfiltrationDetection.ps1": {
+      "description": "Detects suspicious inbox rules that may indicate data exfiltration (forwarding to external domains, deletion rules).",
+      "notes": "Customize suspicious keywords/domains. Reports all rules or only suspicious ones.",
+      "examples": ".\"InboxRuleExfiltrationDetection.ps1\" -SuspiciousDomains \"dropbox.com\",\"gmail.com\""
+    },
+    "scripts/powershell/exchange/LitigationHoldEnablement.ps1": {
+      "description": "Enables, disables, or reports on litigation hold for Exchange Online mailboxes.",
+      "notes": "Use -ReportOnly to audit current hold status without changes. -HoldDurationDays sets retention.",
+      "examples": ".\"LitigationHoldEnablement.ps1\" -UserPrincipalNames \"user@contoso.com\" -EnableHold -HoldDurationDays 365"
+    },
+    "scripts/powershell/exchange/MailboxPermissionAudit.ps1": {
+      "description": "Audits Exchange Online mailbox permissions including FullAccess, SendAs, and SendOnBehalf.",
+      "notes": "Target specific users with -UserPrincipalNames or audit all mailboxes. Filters by permission type.",
+      "examples": ".\"MailboxPermissionAudit.ps1\" -IncludePermissionTypes \"FullAccess,SendAs\" -ShowInherited"
+    },
+    "scripts/powershell/exchange/MailboxSizeGrowthReport.ps1": {
+      "description": "Reports on Exchange Online mailbox sizes with growth trend analysis over a configurable window.",
+      "notes": "Use -ShowGrowth to track size changes. -WarningSizeGB and -CriticalSizeGB flag oversized mailboxes.",
+      "examples": ".\"MailboxSizeGrowthReport.ps1\" -ShowGrowth -TopGrowthDays 30 -WarningSizeGB 50 -CriticalSizeGB 100"
+    },
+    "scripts/powershell/exchange/SharedMailboxAutoProvision.ps1": {
+      "description": "Auto-provisions shared mailboxes from a CSV and optionally grants access permissions.",
+      "notes": "CSV must have at minimum a 'Name' column. Can add users as members and grant FullAccess/SendAs.",
+      "examples": ".\"SharedMailboxAutoProvision.ps1\" -CsvPath \"sharedmailboxes.csv\" -GrantFullAccess -HideFromGAL"
+    },
+    "scripts/powershell/exchange/TransportRuleExportImport.ps1": {
+      "description": "Exports or imports Exchange Online transport rules (mail flow rules) with parameter sets.",
+      "notes": "Use -ExportPath to export rules to XML, -ImportPath to import from XML. -WhatIf for import preview.",
+      "examples": ".\"TransportRuleExportImport.ps1\" -ExportPath \"rules.xml\""
+    },
+    "scripts/powershell/m365/BulkUserOffboarding.ps1": {
+      "description": "Bulk offboards users via CSV or UPN list: revokes sessions, converts to shared mailbox, forwards email, removes licenses.",
+      "notes": "Two parameter sets: -CsvPath for CSV input or -UserPrincipalNames for manual list. -WhatIf to preview.",
+      "examples": ".\"BulkUserOffboarding.ps1\" -CsvPath \"offboard.csv\" -ConvertToSharedMailbox -RemoveLicenses -WhatIf"
+    },
+    "scripts/powershell/m365/BulkUserOnboarding.ps1": {
+      "description": "Bulk onboards new users from a CSV into Microsoft 365 with mailbox creation and license assignment.",
+      "notes": "CSV must include at minimum: FirstName, LastName, UserPrincipalName. -WhatIf to preview.",
+      "examples": ".\"BulkUserOnboarding.ps1\" -CsvPath \"newusers.csv\" -UsageLocation \"US\""
+    },
+    "scripts/powershell/m365/GuestAccountAudit.ps1": {
+      "description": "Audits guest accounts in the tenant and optionally removes or blocks sign-in for stale guests.",
+      "notes": "Stale threshold defaults to 90 days. -RemoveStaleGuests deletes, -BlockSignInForStale blocks.",
+      "examples": ".\"GuestAccountAudit.ps1\" -StaleGuestDays 60 -BlockSignInForStale -WhatIf"
+    },
+    "scripts/powershell/m365/LicenseOptimizationReport.ps1": {
+      "description": "Analyzes M365 license assignments to identify inactive or unlicensed users and optimization opportunities.",
+      "notes": "Set -InactiveThresholdDays to define inactivity. -ShowUnlicensedUsers to include unlicensed accounts.",
+      "examples": ".\"LicenseOptimizationReport.ps1\" -InactiveThresholdDays 30 -ShowUnlicensedUsers"
+    },
+    "scripts/powershell/m365/MFAEnforcementReport.ps1": {
+      "description": "Reports on MFA enrollment status across all users, including Conditional Access policy coverage analysis.",
+      "notes": "Checks per-user MFA methods and CA policy coverage. Flags non-compliant users. CSV export available.",
+      "examples": ".\"MFAEnforcementReport.ps1\" -IncludeExcludedUsers"
+    },
+    "scripts/powershell/m365/PrivilegedRoleAudit.ps1": {
+      "description": "Audits Microsoft Entra ID privileged role assignments including permanent and PIM-eligible members.",
+      "notes": "Use -IncludePimEligible and -IncludePermanent to control which assignments are reported.",
+      "examples": ".\"PrivilegedRoleAudit.ps1\" -IncludePimEligible -IncludePermanent"
+    },
+    "scripts/powershell/m365/RiskySignInParser.ps1": {
+      "description": "Retrieves and parses risky sign-in events from Entra ID with risk level filtering.",
+      "notes": "Defaults to last 24 hours. Supports risk level filtering: low, medium, high, none.",
+      "examples": ".\"RiskySignInParser.ps1\" -HoursBack 48 -RiskLevel \"high\""
+    },
+    "scripts/powershell/m365/SecureScoreReporting.ps1": {
+      "description": "Retrieves Microsoft Secure Score with optional control-level breakdown for security posture analysis.",
+      "notes": "Use -IncludeControlScores for detailed per-control scoring. Generates HTML and CSV output.",
+      "examples": ".\"SecureScoreReporting.ps1\" -IncludeControlScores"
+    },
+    "scripts/powershell/m365/StaleUserDetection.ps1": {
+      "description": "Detects stale/inactive user accounts in Entra ID and optionally disables them.",
+      "notes": "Configurable inactivity period. -IncludeNeverLoggedIn catches accounts that never signed in.",
+      "examples": ".\"StaleUserDetection.ps1\" -InactiveDays 60 -DisableUsers -WhatIf"
+    },
+    "scripts/powershell/m365/conditional-access-audit.ps1": {
+      "description": "Audits Microsoft Entra Conditional Access policies. Flattens policies to JSON/CSV, resolves Named Location GUIDs, and flags weak or misconfigured policies.",
+      "notes": "Outputs a structured CSV with each policy condition expanded. Use -TenantId for cross-tenant audits.",
+      "examples": ".\"conditional-access-audit.ps1\" -OutputPath \".\\CA_Audit\""
+    },
+    "scripts/powershell/security/EmailAuth-Audit.ps1": {
+      "description": "Audits SPF, DKIM, and DMARC DNS records for a list of domains. Generates HTML report with color-coded status.",
+      "notes": "Reads domains from a predefined CSV path. Interactive export format selection. Requires DnsClient module (built into Windows).",
+      "examples": "# Edit $InputCsv path first, then run: .\"EmailAuth-Audit.ps1\""
+    },
+    "scripts/powershell/server/BackupVerification.ps1": {
+      "description": "Verifies Windows backup status via wbadmin or VSS on one or more servers.",
+      "notes": "Checks backup age and raises alerts if backups are older than threshold. Email alerts supported.",
+      "examples": ".\"BackupVerification.ps1\" -ComputerNames \"SRV01\",\"SRV02\" -AlertIfOlderThanHours 48"
+    },
+    "scripts/powershell/server/DiskSpaceMonitor.ps1": {
+      "description": "Monitors disk space on local or remote servers with warning/critical thresholds and email alerts.",
+      "notes": "Defaults to local machine. Targets remote machines via -ComputerNames. Sends email alerts when thresholds breached.",
+      "examples": ".\"DiskSpaceMonitor.ps1\" -ComputerNames \"SRV01\",\"SRV02\" -WarningThresholdPercent 20 -CriticalThresholdPercent 10"
+    },
+    "scripts/powershell/server/EventLogAnomalyParser.ps1": {
+      "description": "Parses Windows event logs for critical errors and anomalies with burst detection and Event ID filtering.",
+      "notes": "Scans System, Application, Security logs. Burst detection flags repeated Event IDs in a time window.",
+      "examples": ".\"EventLogAnomalyParser.ps1\" -ComputerNames \"SRV01\" -HoursBack 24 -BurstThreshold 5"
+    },
+    "scripts/powershell/server/FileServerPermissionAudit.ps1": {
+      "description": "Audits NTFS and share permissions on file server paths with recursion depth control.",
+      "notes": "-Paths is mandatory. Reports inherited and explicit permissions. Can scan remote servers for unused shares.",
+      "examples": ".\"FileServerPermissionAudit.ps1\" -Paths \"\\\\SRV01\\Shares\" -MaxDepth 3"
+    },
+    "scripts/powershell/server/HyperV-VMInventory.ps1": {
+      "description": "Inventories Hyper-V VMs across one or more hosts with optional snapshot, network, and storage details.",
+      "notes": "Targets local host by default. Include snapshots/networks/storage with corresponding switches.",
+      "examples": ".\"HyperV-VMInventory.ps1\" -HyperVHosts \"HV01\",\"HV02\" -IncludeSnapshots -IncludeNetworks"
+    },
+    "scripts/powershell/server/PatchComplianceReport.ps1": {
+      "description": "Checks Windows patch compliance against Microsoft Update catalog via WU API on one or more servers.",
+      "notes": "Reports missing updates by KB ID. Can flag servers not patched within N days.",
+      "examples": ".\"PatchComplianceReport.ps1\" -ComputerNames \"SRV01\",\"SRV02\" -DaysSinceLastUpdate 30"
+    },
+    "scripts/powershell/server/ServiceHealthMonitor.ps1": {
+      "description": "Monitors critical Windows services across remote servers and sends alerts on stopped services.",
+      "notes": "Defaults to common critical services. Specify custom services with -ServiceNames. Email alerts supported.",
+      "examples": ".\"ServiceHealthMonitor.ps1\" -ComputerNames \"SRV01\",\"SRV02\" -ServiceNames \"Spooler\",\"W3SVC\""
+    },
+    "scripts/powershell/server/event-log-anomaly.ps1": {
+      "description": "Windows Event Log Anomaly Parser with burst detection. Detects critical errors, service crashes, and auth failures across local or remote machines.",
+      "notes": "Uses Get-WinEvent with burst detection. Flags repeated Event IDs within a configurable time window. Exports to CSV/JSON.",
+      "examples": ".\"event-log-anomaly.ps1\" -ComputerName \"SRV01\" -HoursBack 48 -BurstThreshold 10 -BurstWindowMinutes 30"
+    },
+    "scripts/powershell/server/monitor-disk-space.ps1": {
+      "description": "Unattended disk space monitor designed for Task Scheduler execution. Sends email alerts when free space drops below threshold.",
+      "notes": "Configurable via in-script variables. No parameters needed. Designed for scheduled, non-interactive use.",
+      "examples": "# Configure variables in the script, then schedule with Task Scheduler: pwsh -File \"monitor-disk-space.ps1\""
+    }
+  }
+}
