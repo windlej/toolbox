@@ -1,30 +1,97 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Resources
+
+<#
+.SYNOPSIS
+Reports privileged Azure RBAC role assignments (Owner, Contributor, User Access Administrator) per subscription and resource group.
+
+.DESCRIPTION
+For each accessible subscription (or the ones you list) the script reads role assignments at the subscription
+scope and at every resource group scope, and keeps the ones whose role is in the privileged role list.
+Each result row records the principal (display name, sign-in name, object type), role, scope and whether the
+principal is a service principal.
+
+Output is an HTML report (primary) with Owner / Contributor / user / service principal counts and one row per
+assignment, plus an optional CSV. The script makes no changes to Azure.
+
+.PARAMETER SubscriptionIds
+Optional list of subscription ids to audit. Default: every subscription the signed-in account can see.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the assignments to a CSV next to the HTML report.
+
+.PARAMETER PrivilegedRoles
+Role names treated as privileged. Default: Owner, Contributor, User Access Administrator.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Get-AzureRbacReport.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-AzureRbacReport.ps1 -SubscriptionIds 00000000-0000-0000-0000-000000000000 -PrivilegedRoles Owner,'User Access Administrator' -ExportCsv -CustomerName Fabrikam -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources modules)
+Permissions:  Azure RBAC Reader on each subscription (needs Microsoft.Authorization/roleAssignments/read); Entra directory read to resolve principal names
+When to use:  Access review of a customer subscription, before removing standing Owner rights, or to list who can grant access.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\RBACAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [string[]]$PrivilegedRoles = @("Owner", "Contributor", "User Access Administrator"),
 
-    [Parameter(Mandatory = $false)]
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-AzureRbacReport_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-AzureRbacReport_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-AzureRbacReport_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -34,15 +101,20 @@ function Get-RoleAssignmentsRecursive {
         [string]$SubscriptionName
     )
 
-    $Assignments = Get-AzRoleAssignment -Scope $Scope -ErrorAction SilentlyContinue
-    $Results = @()
+    $Assignments = $null
+    try {
+        $Assignments = Get-AzRoleAssignment -Scope $Scope -ErrorAction Stop
+    } catch {
+        Write-Log "Could not read role assignments at ${Scope}: $_" 'WARN'
+    }
+    $Found = @()
 
     foreach ($Assignment in $Assignments) {
         if ($Assignment.RoleDefinitionName -in $PrivilegedRoles) {
             $ScopeType = "Subscription"
             $ScopeName = $SubscriptionName
 
-            $Results += [PSCustomObject]@{
+            $Found += [PSCustomObject]@{
                 SubscriptionName  = $SubscriptionName
                 Scope             = $Scope
                 ScopeType         = $ScopeType
@@ -59,16 +131,15 @@ function Get-RoleAssignmentsRecursive {
         }
     }
 
-    return $Results
+    return $Found
 }
 
-# ── MAIN ──
-Write-Host "=== RBAC Audit Script ===" -ForegroundColor Cyan
-Write-Host "Monitoring roles: $($PrivilegedRoles -join ', ')" -ForegroundColor White
+# -- MAIN --
+Write-Log 'RBAC audit starting.'
+Write-Log "Monitoring roles: $($PrivilegedRoles -join ', ')"
 
 if (-not $SkipAzConnect) {
-    $Connected = Connect-ToAzure
-    if (-not $Connected) { return }
+    Connect-ToAzure
 }
 
 if (-not $SubscriptionIds) {
@@ -78,37 +149,44 @@ if (-not $SubscriptionIds) {
 
 foreach ($SubId in $SubscriptionIds) {
     try {
-        Set-AzContext -SubscriptionId $SubId | Out-Null
+        Set-AzContext -SubscriptionId $SubId -ErrorAction Stop | Out-Null
         $SubName = (Get-AzContext).Subscription.Name
-    } catch { continue }
+    } catch {
+        Write-Log "Cannot access subscription ${SubId}: $_" 'WARN'
+        continue
+    }
 
-    Write-Host "Auditing: $SubName" -ForegroundColor Yellow
+    Write-Log "Auditing: $SubName"
 
-    $Results.AddRange((Get-RoleAssignmentsRecursive -Scope "/subscriptions/$SubId" -SubscriptionName $SubName))
+    foreach ($Item in @(Get-RoleAssignmentsRecursive -Scope "/subscriptions/$SubId" -SubscriptionName $SubName)) {
+        $Results.Add($Item)
+    }
 
-    $RGs = Get-AzResourceGroup -ErrorAction SilentlyContinue
+    try {
+        $RGs = Get-AzResourceGroup -ErrorAction Stop
+    } catch {
+        Write-Log "Could not list resource groups in ${SubName}: $_" 'WARN'
+        $RGs = @()
+    }
     foreach ($RG in $RGs) {
-        $RGAssignments = Get-RoleAssignmentsRecursive -Scope $RG.ResourceId -SubscriptionName $SubName
-        $Results.AddRange($RGAssignments)
+        $RGAssignments = @(Get-RoleAssignmentsRecursive -Scope $RG.ResourceId -SubscriptionName $SubName)
+        foreach ($Item in $RGAssignments) {
+            $Results.Add($Item)
+        }
 
         if ($RGAssignments.Count -gt 0) {
-            Write-Host "  Found $($RGAssignments.Count) privileged assignments in RG: $($RG.ResourceGroupName)" -ForegroundColor Gray
+            Write-Log "  Found $($RGAssignments.Count) privileged assignments in RG: $($RG.ResourceGroupName)"
         }
     }
 }
 
 $TotalAssignments = $Results.Count
-$OwnerCount = ($Results | Where-Object { $_.RoleDefinitionName -eq "Owner" }).Count
-$ContributorCount = ($Results | Where-Object { $_.RoleDefinitionName -eq "Contributor" }).Count
-$SPCount = ($Results | Where-Object { $_.IsServicePrincipal }).Count
-$UserCount = ($Results | Where-Object { -not $_.IsServicePrincipal }).Count
+$OwnerCount = @($Results | Where-Object { $_.RoleDefinitionName -eq "Owner" }).Count
+$ContributorCount = @($Results | Where-Object { $_.RoleDefinitionName -eq "Contributor" }).Count
+$SPCount = @($Results | Where-Object { $_.IsServicePrincipal }).Count
+$UserCount = @($Results | Where-Object { -not $_.IsServicePrincipal }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Total Privileged Assignments: $TotalAssignments" -ForegroundColor White
-Write-Host "  Owners: $OwnerCount" -ForegroundColor Red
-Write-Host "  Contributors: $ContributorCount" -ForegroundColor Yellow
-Write-Host "  Users: $UserCount" -ForegroundColor Gray
-Write-Host "  Service Principals: $SPCount" -ForegroundColor Gray
+Write-Log "Summary: Privileged assignments $TotalAssignments | Owners $OwnerCount | Contributors $ContributorCount | Users $UserCount | Service principals $SPCount"
 
 $HtmlRows = $Results | Sort-Object RoleDefinitionName, DisplayName | ForEach-Object {
     $RowClass = if ($_.RoleDefinitionName -eq "Owner") { "danger" }
@@ -154,10 +232,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $Results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

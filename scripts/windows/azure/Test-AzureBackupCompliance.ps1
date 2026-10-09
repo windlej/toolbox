@@ -1,45 +1,99 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Compute, Az.RecoveryServices
+
+<#
+.SYNOPSIS
+Checks which Azure VMs are protected by Azure Backup (Recovery Services vaults).
+
+.DESCRIPTION
+For each accessible subscription (or the ones you list) the script lists all Recovery Services vaults and the
+Azure VM backup items in them, then compares VM names against every VM in the subscription. Each VM is marked
+Protected or UNPROTECTED; vaults and their backup policy names are also recorded.
+
+Output is an HTML report (primary) listing the VMs with coverage percentage, plus an optional CSV of the VM
+rows. Matching is by VM name only. The script makes no changes to Azure.
+
+.PARAMETER SubscriptionIds
+Optional list of subscription ids to check. Default: every subscription the signed-in account can see.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the VM protection rows to a CSV next to the HTML report.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Test-AzureBackupCompliance.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Test-AzureBackupCompliance.ps1 -SubscriptionIds 00000000-0000-0000-0000-000000000000 -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts, Az.Compute and Az.RecoveryServices modules)
+Permissions:  Azure RBAC Reader on the subscriptions plus Backup Reader on the Recovery Services vaults
+When to use:  Disaster-recovery readiness review, or to prove backup coverage to an auditor or customer.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\AzureBackupCompliance_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Test-AzureBackupCompliance_$stamp.html"
+$csvPath  = Join-Path $outDir "Test-AzureBackupCompliance_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Test-AzureBackupCompliance_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
-function Get-VMBackupStatus {
-    param([string]$VMId)
-
-    try {
-        $Backup = Get-AzRecoveryServicesBackupItem -VaultId $null -ErrorAction SilentlyContinue
-        return $null
-    } catch { return $null }
-}
-
-# ── MAIN ──
-Write-Host "=== Azure Backup Compliance Check ===" -ForegroundColor Cyan
+# -- MAIN --
+Write-Log 'Azure backup compliance check starting.'
 
 if (-not $SkipAzConnect) {
-    $Connected = Connect-ToAzure
-    if (-not $Connected) { return }
+    Connect-ToAzure
 }
 
 if (-not $SubscriptionIds) {
@@ -49,16 +103,23 @@ if (-not $SubscriptionIds) {
 
 foreach ($SubId in $SubscriptionIds) {
     try {
-        Set-AzContext -SubscriptionId $SubId | Out-Null
+        Set-AzContext -SubscriptionId $SubId -ErrorAction Stop | Out-Null
         $SubName = (Get-AzContext).Subscription.Name
-    } catch { continue }
+    } catch {
+        Write-Log "Cannot access subscription ${SubId}: $_" 'WARN'
+        continue
+    }
 
-    Write-Host "Checking subscription: $SubName" -ForegroundColor Yellow
+    Write-Log "Checking subscription: $SubName"
 
     $Vaults = Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue
-    $VaultNames = $Vaults | Select-Object -ExpandProperty Name
 
-    $VMs = Get-AzVM -ErrorAction SilentlyContinue
+    try {
+        $VMs = Get-AzVM -ErrorAction Stop
+    } catch {
+        Write-Log "Could not list VMs in ${SubName}: $_" 'WARN'
+        continue
+    }
     $ProtectedVMs = @()
 
     foreach ($Vault in $Vaults) {
@@ -68,7 +129,9 @@ foreach ($SubId in $SubscriptionIds) {
             foreach ($Item in $ProtectedItems) {
                 $ProtectedVMs += $Item.VmName
             }
-        } catch { }
+        } catch {
+            Write-Log "Could not read backup items from vault $($Vault.Name): $_" 'WARN'
+        }
     }
 
     foreach ($VM in $VMs) {
@@ -100,17 +163,18 @@ foreach ($SubId in $SubscriptionIds) {
                 BackupStatus     = "Vault Available: $PolicyName"
                 Protectable      = ""
             })
-        } catch { }
+        } catch {
+            Write-Log "Could not read policies from vault $($Vault.Name): $_" 'WARN'
+        }
     }
 }
 
-$TotalVMs = ($Results | Where-Object { $_.Protectable -eq "Yes" }).Count
-$ProtectedCount = ($Results | Where-Object { $_.BackupStatus -eq "Protected" }).Count
-$UnprotectedCount = ($Results | Where-Object { $_.BackupStatus -eq "UNPROTECTED" }).Count
+$TotalVMs = @($Results | Where-Object { $_.Protectable -eq "Yes" }).Count
+$ProtectedCount = @($Results | Where-Object { $_.BackupStatus -eq "Protected" }).Count
+$UnprotectedCount = @($Results | Where-Object { $_.BackupStatus -eq "UNPROTECTED" }).Count
 $ProtectionPercent = if ($TotalVMs -gt 0) { [math]::Round(($ProtectedCount / $TotalVMs) * 100, 1) } else { 0 }
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Total VMs: $TotalVMs | Protected: $ProtectedCount | Unprotected: $UnprotectedCount | Coverage: $ProtectionPercent%"
+Write-Log "Summary: Total VMs $TotalVMs | Protected $ProtectedCount | Unprotected $UnprotectedCount | Coverage $ProtectionPercent%"
 
 $HtmlRows = $Results | Where-Object { $_.Protectable -eq "Yes" } | Sort-Object BackupStatus, SubscriptionName | ForEach-Object {
     $RowClass = if ($_.BackupStatus -eq "UNPROTECTED") { "danger" } else { "" }
@@ -151,10 +215,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $Results | Where-Object { $_.Protectable -eq "Yes" } | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $Results | Where-Object { $_.Protectable -eq "Yes" } | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

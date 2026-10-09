@@ -1,38 +1,103 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Network
+
+<#
+.SYNOPSIS
+Audits Azure network security group (NSG) rules for overly permissive access and rates each rule.
+
+.DESCRIPTION
+Walks every accessible subscription (or the ones you list) and reads all NSGs and their security rules.
+Each rule is flagged when it allows traffic from any source, to any destination, on all ports, or with any
+protocol, and is rated Low / Medium / High / Critical (Critical = inbound allow from Internet/any to all ports).
+Default platform rules are skipped unless -IncludeDefaultRules is used.
+
+Output is an HTML report (primary) with a summary and one row per rule, plus an optional CSV of the same data.
+With -FlagHighRiskOnly only rules rated above Low are included. The script makes no changes to Azure.
+
+.PARAMETER SubscriptionIds
+Optional list of subscription ids to scan. Default: every subscription the signed-in account can see.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the findings to a CSV next to the HTML report.
+
+.PARAMETER IncludeDefaultRules
+Also analyse the built-in default NSG rules (AllowVnetInBound, etc.).
+
+.PARAMETER FlagHighRiskOnly
+Report only rules rated Medium, High or Critical.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Get-AzureNsgRiskReport.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-AzureNsgRiskReport.ps1 -SubscriptionIds 00000000-0000-0000-0000-000000000000 -FlagHighRiskOnly -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Network modules)
+Permissions:  Azure RBAC Reader on each subscription being scanned
+When to use:  Security review of a new customer tenant, before a pen test, or to find RDP/SSH/any-any rules open to the Internet.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\NSGAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [switch]$IncludeDefaultRules,
 
-    [Parameter(Mandatory = $false)]
     [switch]$FlagHighRiskOnly,
 
-    [Parameter(Mandatory = $false)]
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-AzureNsgRiskReport_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-AzureNsgRiskReport_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-AzureNsgRiskReport_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 $HighRiskRules = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        if (-not (Get-Module Az.Network -ListAvailable -ErrorAction SilentlyContinue)) {
-            Write-Warning "Az.Network module not found"
-            return $false
-        }
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -69,8 +134,8 @@ function Test-RuleRisk {
     return @{ Risk = $Risk; Flags = $Flags }
 }
 
-# ── MAIN ──
-Write-Host "=== NSG Audit (Overly Permissive Rules) ===" -ForegroundColor Cyan
+# -- MAIN --
+Write-Log 'NSG audit (overly permissive rules) starting.'
 
 if (-not $SkipAzConnect) {
     Connect-ToAzure
@@ -83,13 +148,21 @@ if (-not $SubscriptionIds) {
 
 foreach ($SubId in $SubscriptionIds) {
     try {
-        Set-AzContext -SubscriptionId $SubId | Out-Null
+        Set-AzContext -SubscriptionId $SubId -ErrorAction Stop | Out-Null
         $SubName = (Get-AzContext).Subscription.Name
-    } catch { continue }
+    } catch {
+        Write-Log "Cannot access subscription ${SubId}: $_" 'WARN'
+        continue
+    }
 
-    Write-Host "Scanning NSGs in: $SubName" -ForegroundColor Yellow
+    Write-Log "Scanning NSGs in: $SubName"
 
-    $NSGs = Get-AzNetworkSecurityGroup -ErrorAction SilentlyContinue
+    try {
+        $NSGs = Get-AzNetworkSecurityGroup -ErrorAction Stop
+    } catch {
+        Write-Log "Could not list NSGs in ${SubName}: $_" 'WARN'
+        continue
+    }
 
     foreach ($NSG in $NSGs) {
         $Rules = @()
@@ -143,15 +216,11 @@ foreach ($SubId in $SubscriptionIds) {
 }
 
 $FinalResults = if ($FlagHighRiskOnly) { $HighRiskRules } else { $Results }
-$CriticalCount = ($FinalResults | Where-Object { $_.Risk -eq "Critical" }).Count
-$HighCount = ($FinalResults | Where-Object { $_.Risk -eq "High" }).Count
-$MediumCount = ($FinalResults | Where-Object { $_.Risk -eq "Medium" }).Count
+$CriticalCount = @($FinalResults | Where-Object { $_.Risk -eq "Critical" }).Count
+$HighCount = @($FinalResults | Where-Object { $_.Risk -eq "High" }).Count
+$MediumCount = @($FinalResults | Where-Object { $_.Risk -eq "Medium" }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Total Rules: $($FinalResults.Count)" -ForegroundColor White
-Write-Host "Critical: $CriticalCount" -ForegroundColor Red
-Write-Host "High: $HighCount" -ForegroundColor Red
-Write-Host "Medium: $MediumCount" -ForegroundColor Yellow
+Write-Log "Summary: Total rules $($FinalResults.Count) | Critical $CriticalCount | High $HighCount | Medium $MediumCount"
 
 $HtmlRows = $FinalResults | Sort-Object Risk, Priority | ForEach-Object {
     $RowClass = switch ($_.Risk) {
@@ -202,10 +271,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $FinalResults | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $FinalResults | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

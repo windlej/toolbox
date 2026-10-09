@@ -1,24 +1,91 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Resources
+
+<#
+.SYNOPSIS
+Runs basic Azure/Entra connectivity checks and reports whether on-premises directory sync (Entra Connect) is enabled.
+
+.DESCRIPTION
+Signs in to Azure and records a short list of checks: Az connectivity, tenant discovery, subscription access, and
+(when a Microsoft Graph session exists) whether the tenant has on-premises directory synchronization enabled.
+When sync is enabled, informational rows are added reminding you to verify sync health and password hash sync
+in the Entra Connect Health portal.
+
+This is a lightweight sanity check, not a full Entra Connect health assessment: it does not read sync cycles,
+connector errors or server status. The sync-status lookup uses Invoke-MgGraphRequest, so run Connect-MgGraph
+(Organization.Read.All) first; without a Graph session the status is reported as undetermined.
+
+Output is an HTML report (primary) with pass/warn/fail counts and one row per check, plus an optional CSV.
+The script makes no changes to Azure or Entra.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the check results to a CSV next to the HTML report.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Test-EntraConnectHealth.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+Connect-MgGraph -Scopes Organization.Read.All; .\Test-EntraConnectHealth.ps1 -SkipAzConnect -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources; Microsoft.Graph.Authentication for the sync-status check)
+Permissions:  Any Azure RBAC role giving subscription visibility (Reader); Graph delegated Organization.Read.All (Entra role Global Reader or Directory Readers) for the sync status
+When to use:  First-pass check of a hybrid tenant before a migration or when users report that on-premises changes are not syncing.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\ADConnectHealth_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Test-EntraConnectHealth_$stamp.html"
+$csvPath  = Join-Path $outDir "Test-EntraConnectHealth_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Test-EntraConnectHealth_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -32,25 +99,25 @@ function Get-ADConnectServer {
     }
 }
 
-# ── MAIN ──
-Write-Host "=== Azure AD Connect Health Check ===" -ForegroundColor Cyan
+# -- MAIN --
+Write-Log 'Entra Connect health check starting.'
 
 if (-not $SkipAzConnect) {
-    $Connected = Connect-ToAzure
-    if (-not $Connected) { return }
+    Connect-ToAzure
 }
 
+$ADConnectServer = $null
 try {
     $ADConnectServer = Get-ADConnectServer
     if ($ADConnectServer -eq $true) {
-        Write-Host "Hybrid sync is ENABLED for this tenant" -ForegroundColor Green
+        Write-Log 'Hybrid sync is ENABLED for this tenant.'
     } elseif ($ADConnectServer -eq $false) {
-        Write-Host "Hybrid sync is NOT enabled (cloud-only)" -ForegroundColor Yellow
+        Write-Log 'Hybrid sync is NOT enabled (cloud-only).'
     } else {
-        Write-Host "Could not determine sync status" -ForegroundColor Yellow
+        Write-Log 'Could not determine sync status (is there a Microsoft Graph session?).' 'WARN'
     }
 } catch {
-    Write-Warning "Cannot check sync status: $_"
+    Write-Log "Cannot check sync status: $_" 'WARN'
 }
 
 $AADConnect = Get-AzADApplication -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -119,12 +186,11 @@ if ($ADConnectServer -eq $true) {
     })
 }
 
-$PassCount = ($Results | Where-Object { $_.Status -eq "Pass" }).Count
-$FailCount = ($Results | Where-Object { $_.Status -eq "Fail" }).Count
-$WarnCount = ($Results | Where-Object { $_.Status -eq "Warn" }).Count
+$PassCount = @($Results | Where-Object { $_.Status -eq "Pass" }).Count
+$FailCount = @($Results | Where-Object { $_.Status -eq "Fail" }).Count
+$WarnCount = @($Results | Where-Object { $_.Status -eq "Warn" }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Checks: $($Results.Count) | Pass: $PassCount | Warn: $WarnCount | Fail: $FailCount"
+Write-Log "Summary: Checks $($Results.Count) | Pass $PassCount | Warn $WarnCount | Fail $FailCount"
 
 $HtmlRows = $Results | ForEach-Object {
     $RowClass = switch ($_.Status) {
@@ -144,7 +210,7 @@ $HtmlRows = $Results | ForEach-Object {
 $Html = @"
 <!DOCTYPE html>
 <html>
-<head><title>Azure AD Connect Health Check</title>
+<head><title>Entra Connect Health Check</title>
 <style>
 body { font-family: 'Segoe UI', sans-serif; margin: 20px; }
 h1 { color: #2c3e50; }
@@ -156,7 +222,7 @@ td { padding: 6px 8px; border-bottom: 1px solid #ddd; }
 .warning td { background: #fff3cd; }
 </style></head>
 <body>
-<h1>Azure AD Connect Health Check</h1>
+<h1>Entra Connect Health Check</h1>
 <div class='summary'>
     <strong>Total Checks:</strong> $($Results.Count) |
     <strong>Pass:</strong> $PassCount |
@@ -170,10 +236,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $Results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

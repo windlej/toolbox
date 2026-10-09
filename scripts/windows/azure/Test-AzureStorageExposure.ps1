@@ -1,27 +1,92 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Storage
+
+<#
+.SYNOPSIS
+Checks Azure storage accounts for public exposure and weak transport/network settings.
+
+.DESCRIPTION
+For each accessible subscription (or the ones you list) the script reads every storage account and flags:
+anonymous blob public access, firewall default action Allow, HTTPS not required, minimum TLS below 1.2,
+shared key access enabled, and no private endpoint when the firewall is set to Deny. Each account is rated
+Low / Medium / High.
+
+Output is an HTML report (primary) with risk counts and one row per storage account, plus an optional CSV that
+also includes the risk flag text. The script makes no changes to Azure.
+
+.PARAMETER SubscriptionIds
+Optional list of subscription ids to check. Default: every subscription the signed-in account can see.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the results to a CSV next to the HTML report.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Test-AzureStorageExposure.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Test-AzureStorageExposure.ps1 -SubscriptionIds 00000000-0000-0000-0000-000000000000 -ExportCsv -CustomerName Fabrikam -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Storage modules)
+Permissions:  Azure RBAC Reader on each subscription (Microsoft.Storage/storageAccounts/read); no data-plane access needed
+When to use:  Security assessment, after a data-exposure scare, or before a compliance audit to find storage accounts open to the Internet.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\StorageExposure_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Test-AzureStorageExposure_$stamp.html"
+$csvPath  = Join-Path $outDir "Test-AzureStorageExposure_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Test-AzureStorageExposure_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -62,12 +127,11 @@ function Test-StorageExposure {
     return @{ Risk = $Risk; Flags = $Flags }
 }
 
-# ── MAIN ──
-Write-Host "=== Storage Account Public Exposure Check ===" -ForegroundColor Cyan
+# -- MAIN --
+Write-Log 'Storage account public exposure check starting.'
 
 if (-not $SkipAzConnect) {
-    $Connected = Connect-ToAzure
-    if (-not $Connected) { return }
+    Connect-ToAzure
 }
 
 if (-not $SubscriptionIds) {
@@ -77,13 +141,21 @@ if (-not $SubscriptionIds) {
 
 foreach ($SubId in $SubscriptionIds) {
     try {
-        Set-AzContext -SubscriptionId $SubId | Out-Null
+        Set-AzContext -SubscriptionId $SubId -ErrorAction Stop | Out-Null
         $SubName = (Get-AzContext).Subscription.Name
-    } catch { continue }
+    } catch {
+        Write-Log "Cannot access subscription ${SubId}: $_" 'WARN'
+        continue
+    }
 
-    Write-Host "Checking $SubName..." -ForegroundColor Yellow
+    Write-Log "Checking $SubName..."
 
-    $StorageAccounts = Get-AzStorageAccount -ErrorAction SilentlyContinue
+    try {
+        $StorageAccounts = Get-AzStorageAccount -ErrorAction Stop
+    } catch {
+        Write-Log "Could not list storage accounts in ${SubName}: $_" 'WARN'
+        continue
+    }
 
     foreach ($SA in $StorageAccounts) {
         $Analysis = Test-StorageExposure -StorageAccount $SA
@@ -106,12 +178,11 @@ foreach ($SubId in $SubscriptionIds) {
     }
 }
 
-$HighCount = ($Results | Where-Object { $_.RiskLevel -eq "High" }).Count
-$MediumCount = ($Results | Where-Object { $_.RiskLevel -eq "Medium" }).Count
-$LowCount = ($Results | Where-Object { $_.RiskLevel -eq "Low" }).Count
+$HighCount = @($Results | Where-Object { $_.RiskLevel -eq "High" }).Count
+$MediumCount = @($Results | Where-Object { $_.RiskLevel -eq "Medium" }).Count
+$LowCount = @($Results | Where-Object { $_.RiskLevel -eq "Low" }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Storage Accounts: $($Results.Count) | High: $HighCount | Medium: $MediumCount | Low: $LowCount"
+Write-Log "Summary: Storage accounts $($Results.Count) | High $HighCount | Medium $MediumCount | Low $LowCount"
 
 $HtmlRows = $Results | Sort-Object RiskLevel, SubscriptionName | ForEach-Object {
     $RowClass = switch ($_.RiskLevel) {
@@ -161,10 +232,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $Results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

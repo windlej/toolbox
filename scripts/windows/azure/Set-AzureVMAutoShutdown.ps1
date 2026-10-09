@@ -1,39 +1,109 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Resources, Az.Compute
+
+<#
+.SYNOPSIS
+Finds Azure VMs without a DevTest auto-shutdown schedule and optionally applies one.
+
+.DESCRIPTION
+For each accessible subscription (or the ones you list) the script reads every VM and checks for an enabled
+Microsoft.DevTestLab shutdown schedule ("shutdown-computevm"). By default it only reports.
+
+With -ApplySchedules, VMs that have no enabled schedule get a daily shutdown at -DefaultShutdownTime in
+-DefaultTimeZone (notifications disabled). Each write is guarded by ShouldProcess, so -WhatIf shows what
+would change and -Confirm prompts. VMs that already have a schedule are never modified.
+
+Output is an HTML report (primary) with counts and one row per VM, plus an optional CSV.
+
+.PARAMETER SubscriptionIds
+Optional list of subscription ids to process. Default: every subscription the signed-in account can see.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the results to a CSV next to the HTML report.
+
+.PARAMETER DefaultShutdownTime
+Daily shutdown time in HHmm 24-hour format, for example 1900. Default: "19:00" (kept from the original script;
+the DevTest API expects HHmm, so use 1900 style values if the schedule is rejected).
+
+.PARAMETER DefaultTimeZone
+Windows time zone id for the schedule. Default: Eastern Standard Time. Use the customer's zone (tzutil /l).
+
+.PARAMETER ApplySchedules
+Create the shutdown schedule on VMs that lack one. Without this switch the script is read-only.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Set-AzureVMAutoShutdown.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Set-AzureVMAutoShutdown.ps1 -ApplySchedules -DefaultShutdownTime 1900 -DefaultTimeZone "Pacific Standard Time" -SubscriptionIds 00000000-0000-0000-0000-000000000000 -WhatIf -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts, Az.Resources and Az.Compute modules)
+Permissions:  Azure RBAC Reader to audit; Contributor (or Virtual Machine Contributor) on the VMs when using -ApplySchedules
+When to use:  Cost control for dev/test subscriptions where VMs are left running overnight; run read-only first, then apply with -WhatIf before the real run.
+Safety:       Changes data (supports -WhatIf)
+Version:      1.1
+#>
+[CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\VMAutoShutdown_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [string]$DefaultShutdownTime = "19:00",
 
-    [Parameter(Mandatory = $false)]
     [string]$DefaultTimeZone = "Eastern Standard Time",
 
-    [Parameter(Mandatory = $false)]
     [switch]$ApplySchedules,
 
-    [Parameter(Mandatory = $false)]
-    [switch]$WhatIf,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Set-AzureVMAutoShutdown_$stamp.html"
+$csvPath  = Join-Path $outDir "Set-AzureVMAutoShutdown_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Set-AzureVMAutoShutdown_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -62,11 +132,6 @@ function Set-AutoShutdownSchedule {
         [string]$TimeZone
     )
 
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Would set auto-shutdown $ShutdownTime $TimeZone on: $VMId" -ForegroundColor Yellow
-        return "WhatIf"
-    }
-
     try {
         $ShutdownProperties = @{
             taskType = "ComputeVmShutdownTask"
@@ -87,21 +152,21 @@ function Set-AutoShutdownSchedule {
             ErrorAction = 'Stop'
         }
 
-        New-AzResource @Params
+        New-AzResource @Params | Out-Null
         return "Applied"
     } catch {
-        Write-Warning "  Failed to set auto-shutdown: $_"
+        Write-Log "  Failed to set auto-shutdown on ${VMId}: $_" 'WARN'
         return "Failed"
     }
 }
 
-# ── MAIN ──
-Write-Host "=== Azure VM Auto-Shutdown Scheduler ===" -ForegroundColor Cyan
-Write-Host "Default shutdown: $DefaultShutdownTime $DefaultTimeZone" -ForegroundColor White
+# -- MAIN --
+Write-Log 'Azure VM auto-shutdown check starting.'
+Write-Log "Default shutdown: $DefaultShutdownTime $DefaultTimeZone"
+if ($ApplySchedules) { Write-Log '-ApplySchedules set: VMs without a schedule will be changed.' 'WARN' }
 
 if (-not $SkipAzConnect) {
-    $Connected = Connect-ToAzure
-    if (-not $Connected) { return }
+    Connect-ToAzure
 }
 
 if (-not $SubscriptionIds) {
@@ -111,13 +176,21 @@ if (-not $SubscriptionIds) {
 
 foreach ($SubId in $SubscriptionIds) {
     try {
-        Set-AzContext -SubscriptionId $SubId | Out-Null
+        Set-AzContext -SubscriptionId $SubId -ErrorAction Stop | Out-Null
         $SubName = (Get-AzContext).Subscription.Name
-    } catch { continue }
+    } catch {
+        Write-Log "Cannot access subscription ${SubId}: $_" 'WARN'
+        continue
+    }
 
-    Write-Host "Checking VMs in $SubName..." -ForegroundColor Yellow
+    Write-Log "Checking VMs in $SubName..."
 
-    $VMs = Get-AzVM -ErrorAction SilentlyContinue
+    try {
+        $VMs = Get-AzVM -ErrorAction Stop
+    } catch {
+        Write-Log "Could not list VMs in ${SubName}: $_" 'WARN'
+        continue
+    }
 
     foreach ($VM in $VMs) {
         $Existing = Get-ExistingAutoShutdown -VMId $VM.Id
@@ -126,8 +199,13 @@ foreach ($SubId in $SubscriptionIds) {
         $Action = "None"
 
         if (-not $HasSchedule -and $ApplySchedules) {
-            $Action = Set-AutoShutdownSchedule -VMId $VM.Id -Location $VM.Location `
-                -ShutdownTime $DefaultShutdownTime -TimeZone $DefaultTimeZone
+            if ($PSCmdlet.ShouldProcess($VM.Id, "Set auto-shutdown $DefaultShutdownTime $DefaultTimeZone")) {
+                $Action = Set-AutoShutdownSchedule -VMId $VM.Id -Location $VM.Location `
+                    -ShutdownTime $DefaultShutdownTime -TimeZone $DefaultTimeZone
+            }
+            else {
+                $Action = "Skipped"
+            }
         }
 
         $Results.Add([PSCustomObject]@{
@@ -145,12 +223,11 @@ foreach ($SubId in $SubscriptionIds) {
 }
 
 $TotalVMs = $Results.Count
-$ScheduledCount = ($Results | Where-Object { $_.HasAutoShutdown }).Count
-$UnscheduledCount = ($Results | Where-Object { -not $_.HasAutoShutdown }).Count
-$AppliedCount = ($Results | Where-Object { $_.Action -eq "Applied" }).Count
+$ScheduledCount = @($Results | Where-Object { $_.HasAutoShutdown }).Count
+$UnscheduledCount = @($Results | Where-Object { -not $_.HasAutoShutdown }).Count
+$AppliedCount = @($Results | Where-Object { $_.Action -eq "Applied" }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Total VMs: $TotalVMs | With Schedule: $ScheduledCount | Without: $UnscheduledCount | Applied: $AppliedCount"
+Write-Log "Summary: Total VMs $TotalVMs | With schedule $ScheduledCount | Without $UnscheduledCount | Applied $AppliedCount"
 
 $HtmlRows = $Results | Sort-Object HasAutoShutdown, SubscriptionName | ForEach-Object {
     $RowClass = if (-not $_.HasAutoShutdown) { "warning" } else { "" }
@@ -194,10 +271,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $Results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

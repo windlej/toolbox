@@ -1,71 +1,127 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Resources
+
+<#
+.SYNOPSIS
+Audits Azure resources for required tags and optionally adds the missing ones with a default value.
+
+.DESCRIPTION
+For each accessible subscription (or the ones you list) the script reads resources of 15 common types (VMs,
+NSGs, public IPs, VNets, storage, SQL servers, web apps, container registries, Key Vaults, managed identities,
+load balancers, application gateways, disks, automation accounts, data factories) and checks each for the tags
+named in -RequiredTags. With -EnforcedTagValues ("Tag=Value") the tag must also have that exact value.
+
+By default nothing is changed. With -ApplyTags, each non-compliant resource gets the missing required tags
+merged in with -DefaultValue (existing tags are preserved; wrong values on enforced tags are reported but not
+overwritten). Each write is guarded by ShouldProcess, so -WhatIf shows what would change and -Confirm prompts.
+
+Output is an HTML report (primary) with compliance counts and one row per resource, plus an optional CSV.
+
+.PARAMETER SubscriptionIds
+Optional list of subscription ids to process. Default: every subscription the signed-in account can see.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the results to a CSV next to the HTML report.
+
+.PARAMETER RequiredTags
+Tag names every resource must have. Mandatory; for example Environment, Owner, CostCenter.
+
+.PARAMETER EnforcedTagValues
+Optional list of "Tag=Value" entries. A required tag listed here must equal that value to be compliant.
+
+.PARAMETER ApplyTags
+Add missing required tags (value from -DefaultValue). Without this switch the script is read-only.
+
+.PARAMETER DefaultValue
+Value written for missing tags when -ApplyTags is used. Default: Unknown.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Set-AzureResourceTag.ps1 -RequiredTags Environment,Owner,CostCenter -OutputPath D:\Reports
+
+.EXAMPLE
+.\Set-AzureResourceTag.ps1 -RequiredTags Environment,Owner -ApplyTags -DefaultValue TBD -WhatIf -SubscriptionIds 00000000-0000-0000-0000-000000000000 -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources modules)
+Permissions:  Azure RBAC Reader to audit; Tag Contributor (or Contributor) on the scope when using -ApplyTags
+When to use:  Tag governance clean-up before a cost-allocation exercise or policy rollout; run without -ApplyTags first and review the report.
+Safety:       Changes data (supports -WhatIf)
+Version:      1.1
+#>
+[CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\TaggingAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
+
+    [switch]$ExportCsv,
 
     [Parameter(Mandatory = $true)]
     [string[]]$RequiredTags = @("Environment", "Owner", "CostCenter"),
 
-    [Parameter(Mandatory = $false)]
     [string[]]$EnforcedTagValues,
 
-    [Parameter(Mandatory = $false)]
     [switch]$ApplyTags,
 
-    [Parameter(Mandatory = $false)]
     [string]$DefaultValue = "Unknown",
 
-    [Parameter(Mandatory = $false)]
-    [switch]$WhatIf,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Set-AzureResourceTag_$stamp.html"
+$csvPath  = Join-Path $outDir "Set-AzureResourceTag_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Set-AzureResourceTag_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        if (-not (Get-Module Az.Resources -ListAvailable -ErrorAction SilentlyContinue)) {
-            Write-Warning "Az module not found"
-            return $false
-        }
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
-}
-
-function Get-ResourceTags {
-    param([string]$ResourceId)
-
-    try {
-        $Resource = Get-AzResource -ResourceId $ResourceId -ErrorAction SilentlyContinue
-        if ($Resource) { return $Resource.Tags }
-    } catch { }
-    return $null
 }
 
 function Set-ResourceTags {
     param([string]$ResourceId, [hashtable]$Tags)
 
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Would update tags on: $ResourceId" -ForegroundColor Yellow
-        return "WhatIf"
-    }
-
     try {
-        Update-AzTag -ResourceId $ResourceId -Tag $Tags -Operation Merge -ErrorAction Stop
+        Update-AzTag -ResourceId $ResourceId -Tag $Tags -Operation Merge -ErrorAction Stop | Out-Null
         return "Updated"
     } catch {
+        Write-Log "Failed to update tags on ${ResourceId}: $_" 'WARN'
         return "Failed"
     }
 }
@@ -79,9 +135,10 @@ function Get-ResourcesByType {
     } catch { return @() }
 }
 
-# ── MAIN ──
-Write-Host "=== Resource Tagging Enforcement ===" -ForegroundColor Cyan
-Write-Host "Required Tags: $($RequiredTags -join ', ')" -ForegroundColor White
+# -- MAIN --
+Write-Log 'Resource tagging audit starting.'
+Write-Log "Required tags: $($RequiredTags -join ', ')"
+if ($ApplyTags) { Write-Log "-ApplyTags set: missing tags will be added with value '$DefaultValue'." 'WARN' }
 
 if (-not $SkipAzConnect) {
     Connect-ToAzure
@@ -121,11 +178,14 @@ if ($EnforcedTagValues) {
 
 foreach ($SubId in $SubscriptionIds) {
     try {
-        Set-AzContext -SubscriptionId $SubId | Out-Null
+        Set-AzContext -SubscriptionId $SubId -ErrorAction Stop | Out-Null
         $SubName = (Get-AzContext).Subscription.Name
-    } catch { continue }
+    } catch {
+        Write-Log "Cannot access subscription ${SubId}: $_" 'WARN'
+        continue
+    }
 
-    Write-Host "Auditing subscription: $SubName" -ForegroundColor Yellow
+    Write-Log "Auditing subscription: $SubName"
 
     foreach ($Type in $ResourceTypes) {
         $Resources = Get-ResourcesByType -ResourceType $Type
@@ -162,7 +222,12 @@ foreach ($SubId in $SubscriptionIds) {
                 foreach ($Tag in $RequiredTags) {
                     if (-not $NewTags.ContainsKey($Tag)) { $NewTags[$Tag] = $DefaultValue }
                 }
-                $Action = Set-ResourceTags -ResourceId $Resource.ResourceId -Tags $NewTags
+                if ($PSCmdlet.ShouldProcess($Resource.ResourceId, "Merge required tags ($($RequiredTags -join ', '))")) {
+                    $Action = Set-ResourceTags -ResourceId $Resource.ResourceId -Tags $NewTags
+                }
+                else {
+                    $Action = "Skipped"
+                }
             }
 
             $Results.Add([PSCustomObject]@{
@@ -181,15 +246,12 @@ foreach ($SubId in $SubscriptionIds) {
 }
 
 $TotalResources = $Results.Count
-$CompliantCount = ($Results | Where-Object { $_.Compliant }).Count
-$NonCompliantCount = ($Results | Where-Object { -not $_.Compliant }).Count
-$UpdatedCount = ($Results | Where-Object { $_.Action -eq "Updated" }).Count
+$CompliantCount = @($Results | Where-Object { $_.Compliant }).Count
+$NonCompliantCount = @($Results | Where-Object { -not $_.Compliant }).Count
+$UpdatedCount = @($Results | Where-Object { $_.Action -eq "Updated" }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Resources Audited: $TotalResources" -ForegroundColor White
-Write-Host "Compliant: $CompliantCount" -ForegroundColor Green
-Write-Host "Non-Compliant: $NonCompliantCount" -ForegroundColor Red
-if ($ApplyTags) { Write-Host "Updated: $UpdatedCount" -ForegroundColor Yellow }
+Write-Log "Summary: Resources audited $TotalResources | Compliant $CompliantCount | Non-compliant $NonCompliantCount"
+if ($ApplyTags) { Write-Log "Updated: $UpdatedCount" }
 
 $HtmlRows = $Results | Sort-Object Compliant, SubscriptionName, ResourceType | ForEach-Object {
     $RowClass = if (-not $_.Compliant) { "danger" } else { "" }
@@ -233,10 +295,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $Results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

@@ -1,30 +1,97 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Resources
+
+<#
+.SYNOPSIS
+Produces a per-subscription overview of resource counts, resource groups and privileged role assignments.
+
+.DESCRIPTION
+Loops over every subscription the signed-in account can see and records its state, total resources, counts of
+VMs, storage accounts, SQL, network, web app and Key Vault resources, resource group and tagged resource group
+counts, and the number of Owner and Contributor assignments at subscription scope. A subscription that cannot be
+read is listed with State "Error".
+
+Output is an HTML report (primary) with totals and one row per subscription, plus an optional CSV with the full
+column set. The script makes no changes to Azure.
+
+.PARAMETER SubscriptionIds
+Currently not applied: the script audits every accessible subscription regardless of this value.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the full result set to a CSV next to the HTML report.
+
+.PARAMETER IncludeSpending
+Reserved. Accepted for compatibility but currently has no effect (no cost data is collected).
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Get-AzureSubscriptionReport.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-AzureSubscriptionReport.ps1 -ExportCsv -SkipAzConnect -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources modules)
+Permissions:  Azure RBAC Reader on each subscription to be included
+When to use:  First look at an unfamiliar tenant, to size an engagement, or to find empty or disabled subscriptions.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\SubscriptionAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [switch]$IncludeSpending,
 
-    [Parameter(Mandatory = $false)]
     [switch]$SkipAzConnect
 )
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-AzureSubscriptionReport_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-AzureSubscriptionReport_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-AzureSubscriptionReport_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToAzure {
     try {
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -35,50 +102,49 @@ function Get-ResourceCounts {
     $Resources = Get-AzResource -ErrorAction SilentlyContinue
 
     $Counts = @{
-        VMs = ($Resources | Where-Object { $_.ResourceType -eq "Microsoft.Compute/virtualMachines" }).Count
-        Storage = ($Resources | Where-Object { $_.ResourceType -eq "Microsoft.Storage/storageAccounts" }).Count
-        SQL = ($Resources | Where-Object { $_.ResourceType -like "Microsoft.Sql/*" }).Count
-        Networks = ($Resources | Where-Object { $_.ResourceType -like "Microsoft.Network/*" }).Count
-        WebApps = ($Resources | Where-Object { $_.ResourceType -eq "Microsoft.Web/sites" }).Count
-        KeyVaults = ($Resources | Where-Object { $_.ResourceType -eq "Microsoft.KeyVault/vaults" }).Count
-        Total = $Resources.Count
+        VMs = @($Resources | Where-Object { $_.ResourceType -eq "Microsoft.Compute/virtualMachines" }).Count
+        Storage = @($Resources | Where-Object { $_.ResourceType -eq "Microsoft.Storage/storageAccounts" }).Count
+        SQL = @($Resources | Where-Object { $_.ResourceType -like "Microsoft.Sql/*" }).Count
+        Networks = @($Resources | Where-Object { $_.ResourceType -like "Microsoft.Network/*" }).Count
+        WebApps = @($Resources | Where-Object { $_.ResourceType -eq "Microsoft.Web/sites" }).Count
+        KeyVaults = @($Resources | Where-Object { $_.ResourceType -eq "Microsoft.KeyVault/vaults" }).Count
+        Total = @($Resources).Count
     }
 
     return $Counts
 }
 
-# ── MAIN ──
-Write-Host "=== Subscription Audit Report ===" -ForegroundColor Cyan
+# -- MAIN --
+Write-Log 'Subscription audit starting.'
 
 if (-not $SkipAzConnect) {
-    $Connected = Connect-ToAzure
-    if (-not $Connected) { return }
+    Connect-ToAzure
 }
 
 $Subscriptions = Get-AzSubscription -ErrorAction Stop
 $SubCount = ($Subscriptions | Measure-Object).Count
 
-Write-Host "Found $SubCount subscriptions" -ForegroundColor Yellow
+Write-Log "Found $SubCount subscriptions."
 
 foreach ($Sub in $Subscriptions) {
-    Write-Host "  Auditing: $($Sub.Name) ($($Sub.Id))" -ForegroundColor Gray
+    Write-Log "  Auditing: $($Sub.Name) ($($Sub.Id))"
 
     try {
-        Set-AzContext -SubscriptionId $Sub.Id | Out-Null
+        Set-AzContext -SubscriptionId $Sub.Id -ErrorAction Stop | Out-Null
 
         $ResourceCounts = Get-ResourceCounts -SubscriptionId $Sub.Id
 
         $Locations = Get-AzLocation -ErrorAction SilentlyContinue
-        $RegionCount = ($Locations | Where-Object { $_.Providers -contains "Microsoft.Compute" }).Count
+        $RegionCount = @($Locations | Where-Object { $_.Providers -contains "Microsoft.Compute" }).Count
 
         $RoleAssignments = Get-AzRoleAssignment -ErrorAction SilentlyContinue |
             Where-Object { $_.Scope -like "/subscriptions/$($Sub.Id)" }
-        $OwnerCount = ($RoleAssignments | Where-Object { $_.RoleDefinitionName -eq "Owner" }).Count
-        $ContributorCount = ($RoleAssignments | Where-Object { $_.RoleDefinitionName -eq "Contributor" }).Count
+        $OwnerCount = @($RoleAssignments | Where-Object { $_.RoleDefinitionName -eq "Owner" }).Count
+        $ContributorCount = @($RoleAssignments | Where-Object { $_.RoleDefinitionName -eq "Contributor" }).Count
 
-        $Tags = (Get-AzResourceGroup -ErrorAction SilentlyContinue).Tags
-        $TaggedRGs = ($Tags | Where-Object { $_ -and $_.Count -gt 0 }).Count
-        $TotalRGs = (Get-AzResourceGroup -ErrorAction SilentlyContinue).Count
+        $RGs = @(Get-AzResourceGroup -ErrorAction SilentlyContinue)
+        $TaggedRGs = @($RGs | Where-Object { $_.Tags -and $_.Tags.Count -gt 0 }).Count
+        $TotalRGs = $RGs.Count
 
         $State = (Get-AzSubscription -SubscriptionId $Sub.Id).State
 
@@ -100,6 +166,7 @@ foreach ($Sub in $Subscriptions) {
             AvailableRegions    = $RegionCount
         })
     } catch {
+        Write-Log "Failed to audit subscription $($Sub.Name): $_" 'WARN'
         $Results.Add([PSCustomObject]@{
             SubscriptionName = $Sub.Name
             SubscriptionId   = $Sub.Id
@@ -115,11 +182,9 @@ foreach ($Sub in $Subscriptions) {
 $TotalVMs = ($Results | Measure-Object -Property VMs -Sum).Sum
 $TotalStorage = ($Results | Measure-Object -Property StorageAccounts -Sum).Sum
 $TotalResources = ($Results | Measure-Object -Property TotalResources -Sum).Sum
-$ActiveSubs = ($Results | Where-Object { $_.State -eq "Enabled" }).Count
+$ActiveSubs = @($Results | Where-Object { $_.State -eq "Enabled" }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Subscriptions: $SubCount (Active: $ActiveSubs)" -ForegroundColor White
-Write-Host "Total Resources: $TotalResources | VMs: $TotalVMs | Storage: $TotalStorage"
+Write-Log "Summary: Subscriptions $SubCount (Active: $ActiveSubs) | Total resources $TotalResources | VMs $TotalVMs | Storage $TotalStorage"
 
 $HtmlRows = $Results | Sort-Object TotalResources -Descending | ForEach-Object {
     $StateClass = if ($_.State -ne "Enabled") { "danger" } else { "" }
@@ -166,10 +231,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $Results | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

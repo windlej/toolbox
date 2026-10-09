@@ -1,33 +1,93 @@
+#Requires -Version 5.1
+#Requires -Modules Az.Accounts, Az.Compute
+
+<#
+.SYNOPSIS
+Inventories Azure virtual machines across subscriptions with an estimated monthly and annual cost.
+
+.DESCRIPTION
+For each accessible subscription (or the ones you list) the script reads every VM with its power state and
+records name, resource group, region, size, OS type, attached managed disk size, tags and the NIC reference.
+Cost is an ESTIMATE only: it uses a small built-in pay-as-you-go rate card (USD per month) for common sizes
+and a rough per-core guess for others; deallocated or stopped VMs are costed at zero. It does not read actual
+billing data.
+
+Output is an HTML report (primary) sorted by estimated cost with running/stopped/OS totals, plus an optional CSV
+with all columns. The script makes no changes to Azure.
+
+.PARAMETER SubscriptionIds
+Optional list of subscription ids to scan. Default: every subscription the signed-in account can see.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the full inventory to a CSV next to the HTML report.
+
+.PARAMETER SkipAzConnect
+Use the existing Az session instead of calling Connect-AzAccount.
+
+.EXAMPLE
+.\Get-AzureVMInventory.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-AzureVMInventory.ps1 -SubscriptionIds 00000000-0000-0000-0000-000000000000 -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Compute modules)
+Permissions:  Azure RBAC Reader on each subscription being scanned
+When to use:  Cloud estate discovery, right-sizing conversations, or finding stopped-but-not-deallocated VMs before a cost review.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$SubscriptionIds,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\AzureVMInventory_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
 
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
+
     [switch]$SkipAzConnect
 )
 
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-AzureVMInventory_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-AzureVMInventory_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-AzureVMInventory_$stamp.log"
+
 $AllVMs = [System.Collections.Generic.List[PSObject]]::new()
-$Results = @()
 
 function Connect-ToAzure {
     try {
-        $Modules = Get-Module Az.Compute -ListAvailable -ErrorAction SilentlyContinue
-        if (-not $Modules) {
-            Write-Warning "Az module not found. Install: Install-Module Az"
-            return $false
-        }
-        Connect-AzAccount -ErrorAction Stop
-        Write-Host "Connected to Azure" -ForegroundColor Green
-        return $true
+        Connect-AzAccount -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Azure.'
     } catch {
-        Write-Error "Azure connection failed: $_"
-        return $false
+        Write-Log "Azure connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -72,12 +132,11 @@ function Get-VMCostEstimate {
     return 0
 }
 
-# ── MAIN ──
-Write-Host "=== Azure VM Inventory & Cost Estimator ===" -ForegroundColor Cyan
+# -- MAIN --
+Write-Log 'Azure VM inventory and cost estimate starting.'
 
 if (-not $SkipAzConnect) {
-    $Connected = Connect-ToAzure
-    if (-not $Connected) { return }
+    Connect-ToAzure
 }
 
 if (-not $SubscriptionIds) {
@@ -85,20 +144,25 @@ if (-not $SubscriptionIds) {
     $SubscriptionIds = $Subscriptions.Id
 }
 
-Write-Host "Scanning $($SubscriptionIds.Count) subscriptions..." -ForegroundColor Yellow
+Write-Log "Scanning $(@($SubscriptionIds).Count) subscriptions..."
 
 foreach ($SubId in $SubscriptionIds) {
     try {
         Set-AzContext -SubscriptionId $SubId -ErrorAction Stop | Out-Null
         $SubName = (Get-AzContext).Subscription.Name
     } catch {
-        Write-Warning "Cannot access subscription $SubId"
+        Write-Log "Cannot access subscription ${SubId}: $_" 'WARN'
         continue
     }
 
-    Write-Host "  Subscription: $SubName ($SubId)" -ForegroundColor Cyan
+    Write-Log "  Subscription: $SubName ($SubId)"
 
-    $VMs = Get-AzVM -Status -ErrorAction SilentlyContinue
+    try {
+        $VMs = Get-AzVM -Status -ErrorAction Stop
+    } catch {
+        Write-Log "Could not list VMs in ${SubName}: $_" 'WARN'
+        continue
+    }
 
     foreach ($VM in $VMs) {
         $Running = $VM.PowerState -eq "VM running"
@@ -131,17 +195,15 @@ foreach ($SubId in $SubscriptionIds) {
 }
 
 $TotalVMs = $AllVMs.Count
-$RunningCount = ($AllVMs | Where-Object { $_.Running }).Count
-$StoppedCount = ($AllVMs | Where-Object { -not $_.Running }).Count
+$RunningCount = @($AllVMs | Where-Object { $_.Running }).Count
+$StoppedCount = @($AllVMs | Where-Object { -not $_.Running }).Count
 $TotalMonthlyCost = ($AllVMs | Measure-Object -Property MonthlyCostUSD -Sum).Sum
 $TotalAnnualCost = ($AllVMs | Measure-Object -Property AnnualCostUSD -Sum).Sum
-$WindowsCount = ($AllVMs | Where-Object { $_.OsType -eq "Windows" }).Count
-$LinuxCount = ($AllVMs | Where-Object { $_.OsType -eq "Linux" }).Count
+$WindowsCount = @($AllVMs | Where-Object { $_.OsType -eq "Windows" }).Count
+$LinuxCount = @($AllVMs | Where-Object { $_.OsType -eq "Linux" }).Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Total VMs: $TotalVMs | Running: $RunningCount | Stopped: $StoppedCount"
-Write-Host "Windows: $WindowsCount | Linux: $LinuxCount"
-Write-Host "Monthly: `$$([math]::Round($TotalMonthlyCost, 2)) | Annual: `$$([math]::Round($TotalAnnualCost, 2))"
+Write-Log "Summary: Total VMs $TotalVMs | Running $RunningCount | Stopped $StoppedCount | Windows $WindowsCount | Linux $LinuxCount"
+Write-Log "Estimated cost: Monthly `$$([math]::Round($TotalMonthlyCost, 2)) | Annual `$$([math]::Round($TotalAnnualCost, 2))"
 
 $HtmlRows = $AllVMs | Sort-Object MonthlyCostUSD -Descending | ForEach-Object {
     $RowClass = if (-not $_.Running) { "stopped" } else { "" }
@@ -189,10 +251,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $AllVMs | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $AllVMs | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }
