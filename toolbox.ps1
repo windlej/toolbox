@@ -384,7 +384,7 @@ function Get-ScriptParameterString {
             if ($Val -eq $true) { $Parts += "-$Name" }
         } elseif ($Param.Type -eq "string") {
             $Parts += "-$Name `"$([System.Management.Automation.Language.CodeGeneration]::EscapeValue($Val))`""
-        } elseif ($Param.Type -like "*[]" -and $Val -is [array]) {
+        } elseif ($Param.Type -like '*`[`]' -and $Val -is [array]) {
             $Quoted = ($Val | ForEach-Object { "`"$_`"" }) -join ","
             $Parts += "-$Name @($Quoted)"
         } else {
@@ -732,7 +732,7 @@ function Read-ParameterValue {
         }
     }
 
-    if ($Param.Type -like "*[]" -or $Param.Name -like "*Address*" -or $Param.Name -like "*Name*") {
+    if ($Param.Type -like '*`[`]' -or $Param.Name -like "*Address*" -or $Param.Name -like "*Name*") {
         $Input = Read-Host "  $Label (comma-separated) $(if($DefaultStr){ "[$DefaultStr]" })"
         if ($Input -eq "" -and $DefaultStr) { return @($DefaultStr) }
         if ($Input -eq "" -and -not $Param.IsMandatory) { return @() }
