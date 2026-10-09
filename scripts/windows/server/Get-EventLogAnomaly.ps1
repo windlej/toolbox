@@ -1,14 +1,16 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
-    Windows Event Log Anomaly Parser — detects critical errors and behavioral anomalies
+    Windows Event Log Anomaly Parser - detects critical errors and behavioral anomalies
     across System, Application, and Security logs on local or remote machines.
 
 .DESCRIPTION
     Parses Windows Event Logs using Get-WinEvent (preferred over Get-EventLog for
     performance). Filters critical/error-level events, detects anomaly patterns such as
     burst activity, repeated Event IDs, service crashes, and auth failures, then
-    categorizes and exports results to console table, CSV, or JSON.
+    categorizes and shows results in a console table, with optional CSV and JSON export
+    to the output folder. A log file is always written to the output folder.
 
 .PARAMETER ComputerName
     One or more target machine names. Defaults to the local machine.
@@ -22,11 +24,17 @@
 .PARAMETER EventIDs
     Optional array of specific Event IDs to filter on. Leave empty for all critical/error events.
 
+.PARAMETER OutputPath
+    Folder for the log file and any CSV/JSON export. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+    Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
 .PARAMETER ExportCsv
-    Full path for CSV export. Omit to skip CSV output.
+    Switch. Also writes Get-EventLogAnomaly_<timestamp>.csv to the output folder.
 
 .PARAMETER ExportJson
-    Full path for JSON export. Omit to skip JSON output.
+    Switch. Also writes Get-EventLogAnomaly_<timestamp>.json to the output folder.
 
 .PARAMETER BurstThreshold
     Number of errors within BurstWindowMinutes that triggers an anomaly flag. Default: 10.
@@ -35,30 +43,33 @@
     Sliding window (minutes) used to detect error bursts. Default: 5.
 
 .PARAMETER IncludeSummary
-    Switch — if present, prints a summary statistics block at the end.
+    Switch - if present, prints a summary statistics block at the end.
 
 .EXAMPLE
     # Local machine, last 24 h, show summary
-    .\Invoke-EventLogAnomalyParser.ps1 -IncludeSummary
+    .\Get-EventLogAnomaly.ps1 -IncludeSummary -OutputPath D:\Reports
 
 .EXAMPLE
     # Three remote servers, last 7 days, export CSV
-    .\Invoke-EventLogAnomalyParser.ps1 `
+    .\Get-EventLogAnomaly.ps1 `
         -ComputerName SRV01,SRV02,SRV03 `
         -HoursBack 168 `
         -Logs System,Application,Security `
-        -ExportCsv "C:\Reports\EventAnomalies.csv" `
+        -OutputPath D:\Reports `
+        -CustomerName Contoso `
+        -ExportCsv `
         -IncludeSummary
 
 .EXAMPLE
     # Focus on specific Event IDs
-    .\Invoke-EventLogAnomalyParser.ps1 -EventIDs 41,6008,7034,1001 -HoursBack 1
+    .\Get-EventLogAnomaly.ps1 -EventIDs 41,6008,7034,1001 -HoursBack 1 -OutputPath D:\Reports
 
 .NOTES
-    Requires read access to target Event Logs.
-    Security log requires elevated privileges or explicit delegation.
-    Author  : Windows Automation Toolkit
-    Version : 2.0.0
+    Platform:     Windows (Get-WinEvent; remote targets need Remote Event Log Management firewall rules)
+    Permissions:  Read access to the target Event Logs; the Security log needs elevation or Event Log Readers membership
+    When to use:  After an unexpected reboot, crash or slowdown, or as a routine check for repeated errors, bursts and failed logons across servers.
+    Safety:       Read-only
+    Version:      3.0
 #>
 
 [CmdletBinding()]
@@ -74,8 +85,11 @@ param(
 
     [int[]]  $EventIDs           = @(),
 
-    [string] $ExportCsv          = '',
-    [string] $ExportJson         = '',
+    [string] $OutputPath,
+    [string] $CustomerName,
+
+    [switch] $ExportCsv,
+    [switch] $ExportJson,
 
     [int]    $BurstThreshold     = 10,
     [int]    $BurstWindowMinutes = 5,
@@ -85,6 +99,27 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp  = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Get-EventLogAnomaly_$stamp.log"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # REGION: CONSTANTS & CATEGORY MAPPING
@@ -162,7 +197,7 @@ function Invoke-BurstDetection {
     )
 
     $burstSet  = [System.Collections.Generic.HashSet[long]]::new()
-    $sorted    = $Timestamps | Sort-Object
+    $sorted    = @($Timestamps | Sort-Object)
     $count     = $sorted.Count
     $windowTS  = [timespan]::FromMinutes($WindowMinutes)
 
@@ -267,7 +302,7 @@ function Get-CriticalEvents {
         catch [System.Exception] {
             # No events matching filter = benign; other errors are logged
             if ($_.Exception.Message -notmatch 'No events') {
-                Write-Warning "[$TargetComputer][$logName] Query failed: $($_.Exception.Message)"
+                Write-Log "[$TargetComputer][$logName] Query failed: $($_.Exception.Message)" 'WARN'
             }
             continue
         }
@@ -364,7 +399,7 @@ function Write-SummaryReport {
     )
 
     $total      = $Events.Count
-    $anomalies  = ($Events | Where-Object { $_.AnomalyFlag -eq 'Yes' }).Count
+    $anomalies  = @($Events | Where-Object { $_.AnomalyFlag -eq 'Yes' }).Count
     $startLabel = (Get-Date).AddHours(-$HoursBack).ToString('yyyy-MM-dd HH:mm')
     $endLabel   = (Get-Date).ToString('yyyy-MM-dd HH:mm')
 
@@ -421,11 +456,11 @@ function Export-ToCsv {
         [string]           $Path
     )
     try {
-        $Events | Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8 -Force
-        Write-Host "[EXPORT] CSV written → $Path" -ForegroundColor Green
+        $Events | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8 -Force
+        Write-Log "CSV written: $Path"
     }
     catch {
-        Write-Warning "[EXPORT] CSV export failed: $($_.Exception.Message)"
+        Write-Log "CSV export failed: $($_.Exception.Message)" 'WARN'
     }
 }
 
@@ -450,11 +485,11 @@ function Export-ToJson {
             }
         }
         $jsonReady | ConvertTo-Json -Depth 3 |
-            Set-Content -Path $Path -Encoding UTF8 -Force
-        Write-Host "[EXPORT] JSON written → $Path" -ForegroundColor Green
+            Set-Content -LiteralPath $Path -Encoding UTF8 -Force
+        Write-Log "JSON written: $Path"
     }
     catch {
-        Write-Warning "[EXPORT] JSON export failed: $($_.Exception.Message)"
+        Write-Log "JSON export failed: $($_.Exception.Message)" 'WARN'
     }
 }
 
@@ -471,38 +506,38 @@ function Invoke-EventLogAnomalyParser {
     $filterIDs  = if ($EventIDs.Count -gt 0) { $EventIDs } else { @() }
     $allEvents  = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    Write-Host "`n[*] Event Log Anomaly Parser starting..." -ForegroundColor Cyan
-    Write-Host "    Targets   : $($ComputerName -join ', ')"
-    Write-Host "    Logs      : $($Logs -join ', ')"
-    Write-Host "    Window    : Last $HoursBack hour(s) (from $($startTime.ToString('yyyy-MM-dd HH:mm')))"
-    Write-Host "    Burst     : >= $BurstThreshold events within $BurstWindowMinutes minute(s)`n"
+    Write-Log 'Event Log Anomaly Parser starting...'
+    Write-Log "Targets: $($ComputerName -join ', ')"
+    Write-Log "Logs: $($Logs -join ', ')"
+    Write-Log "Window: last $HoursBack hour(s) (from $($startTime.ToString('yyyy-MM-dd HH:mm')))"
+    Write-Log "Burst: >= $BurstThreshold events within $BurstWindowMinutes minute(s)"
 
     foreach ($computer in $ComputerName) {
 
-        Write-Host "[*] Collecting from: $computer" -ForegroundColor Yellow
+        Write-Log "Collecting from: $computer"
 
         try {
-            $machineEvents = Get-CriticalEvents `
+            $machineEvents = @(Get-CriticalEvents `
                 -TargetComputer $computer `
                 -LogNames       $Logs `
                 -StartTime      $startTime `
-                -FilterIDs      $filterIDs
+                -FilterIDs      $filterIDs)
 
-            Write-Host "    Found $($machineEvents.Count) critical/error event(s)."
-            $allEvents.AddRange($machineEvents)
+            Write-Log "Found $($machineEvents.Count) critical/error event(s) on $computer."
+            foreach ($machineEvent in $machineEvents) { $allEvents.Add($machineEvent) }
         }
         catch {
-            Write-Warning "Failed to collect from [$computer]: $($_.Exception.Message)"
+            Write-Log "Failed to collect from [$computer]: $($_.Exception.Message)" 'WARN'
         }
     }
 
     if ($allEvents.Count -eq 0) {
-        Write-Host "`n[OK] No critical/error events found in the specified window.`n" -ForegroundColor Green
+        Write-Log 'No critical/error events found in the specified window.'
         return
     }
 
     # ── Anomaly enrichment ────────────────────────────────────────────────
-    Write-Host "`n[*] Running anomaly detection..." -ForegroundColor Cyan
+    Write-Log 'Running anomaly detection...'
     $enriched = Add-AnomalyFlags `
         -Events        $allEvents `
         -Threshold     $BurstThreshold `
@@ -512,7 +547,7 @@ function Invoke-EventLogAnomalyParser {
     $sorted = @($enriched | Sort-Object Timestamp -Descending)
 
     # ── Console table output ──────────────────────────────────────────────
-    Write-Host "`n[RESULTS] $($sorted.Count) event(s) | Anomaly-flagged: $(($sorted | Where-Object {$_.AnomalyFlag -eq 'Yes'}).Count)`n"
+    Write-Log "Results: $($sorted.Count) event(s) | Anomaly-flagged: $(@($sorted | Where-Object {$_.AnomalyFlag -eq 'Yes'}).Count)"
 
     $sorted | Format-Table -AutoSize -Property @(
         @{Label='Timestamp';    Expression={$_.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')}; Width=20}
@@ -546,8 +581,8 @@ function Invoke-EventLogAnomalyParser {
     }
 
     # ── Export ────────────────────────────────────────────────────────────
-    if ($ExportCsv)  { Export-ToCsv  -Events $sorted -Path $ExportCsv  }
-    if ($ExportJson) { Export-ToJson -Events $sorted -Path $ExportJson }
+    if ($ExportCsv)  { Export-ToCsv  -Events $sorted -Path (Join-Path $outDir "Get-EventLogAnomaly_$stamp.csv")  }
+    if ($ExportJson) { Export-ToJson -Events $sorted -Path (Join-Path $outDir "Get-EventLogAnomaly_$stamp.json") }
 
     # Return the enriched objects to the pipeline for further processing
     return $sorted

@@ -1,12 +1,65 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Reports Windows Update patch compliance for one or more servers as an HTML report (optional CSV).
+
+.DESCRIPTION
+Queries the Windows Update Agent install history on each computer and finds the most recent successful
+update. A server is Compliant when that update is no more than -DaysSinceLastUpdate days old, Out of Date
+when older, and Never Updated when no successful install is found. Optionally checks for a pending reboot
+and for specific KB numbers in the history (the KB results are collected but not shown in the HTML or CSV).
+The report is an HTML table with a summary header. A log file is also written.
+
+.PARAMETER ComputerName
+One or more computers to check. Default: the local machine. Old name: ComputerNames.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write a CSV of the results next to the HTML report.
+
+.PARAMETER DaysSinceLastUpdate
+Maximum age in days of the last successful update for a server to count as Compliant. Default: 30.
+
+.PARAMETER KbIds
+Optional KB identifiers (for example KB5030211) to look for in the update history.
+
+.PARAMETER IncludeRebootStatus
+Check the registry for a pending reboot on the local machine and set the PendingReboot column.
+Note: the registry check runs on the machine running the script, not on remote targets.
+
+.EXAMPLE
+.\Get-PatchComplianceReport.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-PatchComplianceReport.ps1 -ComputerName SRV01,SRV02 -DaysSinceLastUpdate 45 -IncludeRebootStatus -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (Windows Update Agent COM API; remote targets need DCOM/RPC access)
+Permissions:  Local administrator on each target computer
+When to use:  Monthly patch review, before a maintenance window, or to show a customer which servers have fallen behind on updates.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string[]]$ComputerNames = @($env:COMPUTERNAME),
+    [Alias('ComputerNames')]
+    [string[]]$ComputerName = @($env:COMPUTERNAME),
 
     [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\PatchCompliance_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
 
     [Parameter(Mandatory = $false)]
     [int]$DaysSinceLastUpdate = 30,
@@ -18,6 +71,31 @@ param(
     [switch]$IncludeRebootStatus
 )
 
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Get-PatchComplianceReport_$stamp.log"
+$htmlPath = Join-Path $outDir "Get-PatchComplianceReport_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-PatchComplianceReport_$stamp.csv"
+
 function Get-PatchStatus {
     param([string]$ComputerName)
 
@@ -25,7 +103,7 @@ function Get-PatchStatus {
         $Session = [System.Activator]::CreateInstance([Type]::GetTypeFromProgID("Microsoft.Update.Session", $ComputerName))
         $Searcher = $Session.CreateUpdateSearcher()
     } catch {
-        Write-Warning "Cannot connect to $ComputerName (WUA required): $($_.Exception.Message)"
+        Write-Log "Cannot connect to $ComputerName (WUA required): $($_.Exception.Message)" 'WARN'
         return $null
     }
 
@@ -92,24 +170,24 @@ function Get-PatchStatus {
 
 $AllResults = @()
 
-foreach ($Computer in $ComputerNames) {
-    Write-Host "Checking $Computer..." -ForegroundColor Yellow
+foreach ($Computer in $ComputerName) {
+    Write-Log "Checking $Computer..."
     $Result = Get-PatchStatus -ComputerName $Computer
     if ($Result) {
         $AllResults += $Result
     }
 }
 
-$CompliantCount = ($AllResults | Where-Object { $_.Compliance -eq "Compliant" }).Count
-$OutOfDateCount = ($AllResults | Where-Object { $_.Compliance -eq "Out of Date" }).Count
-$NeverUpdatedCount = ($AllResults | Where-Object { $_.Compliance -eq "Never Updated" }).Count
-$PendingRebootCount = ($AllResults | Where-Object { $_.PendingReboot }).Count
+$CompliantCount = @($AllResults | Where-Object { $_.Compliance -eq "Compliant" }).Count
+$OutOfDateCount = @($AllResults | Where-Object { $_.Compliance -eq "Out of Date" }).Count
+$NeverUpdatedCount = @($AllResults | Where-Object { $_.Compliance -eq "Never Updated" }).Count
+$PendingRebootCount = @($AllResults | Where-Object { $_.PendingReboot }).Count
 
-Write-Host "`n=== Patch Compliance Summary ===" -ForegroundColor Cyan
-Write-Host "Compliant: $CompliantCount" -ForegroundColor Green
-Write-Host "Out of Date: $OutOfDateCount" -ForegroundColor Yellow
-Write-Host "Never Updated: $NeverUpdatedCount" -ForegroundColor Red
-if ($IncludeRebootStatus) { Write-Host "Pending Reboot: $PendingRebootCount" -ForegroundColor Red }
+Write-Log '=== Patch Compliance Summary ==='
+Write-Log "Compliant: $CompliantCount"
+Write-Log "Out of Date: $OutOfDateCount"
+Write-Log "Never Updated: $NeverUpdatedCount"
+if ($IncludeRebootStatus) { Write-Log "Pending Reboot: $PendingRebootCount" }
 
 $HtmlRows = $AllResults | Sort-Object Compliance, ComputerName | ForEach-Object {
     $RowClass = switch ($_.Compliance) {
@@ -149,7 +227,7 @@ td { padding: 5px 8px; border-bottom: 1px solid #ddd; }
 <body>
 <h1>Patch Compliance Report</h1>
 <div class='summary'>
-    <strong>Servers:</strong> $($ComputerNames.Count) |
+    <strong>Servers:</strong> $(@($ComputerName).Count) |
     <strong>Compliant:</strong> <span style='color:green;'>$CompliantCount</span> |
     <strong>Out of Date:</strong> <span style='color:orange;'>$OutOfDateCount</span> |
     <strong>Never Updated:</strong> <span style='color:red;'>$NeverUpdatedCount</span> |
@@ -163,11 +241,11 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "`nReport: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
+if ($ExportCsv) {
     $CsvData = $AllResults | Select-Object ComputerName, Compliance, LastInstallDate, DaysSinceUpdate, LastUpdateTitle, TotalUpdates, PendingReboot
-    $CsvData | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+    $CsvData | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

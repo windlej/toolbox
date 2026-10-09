@@ -1,12 +1,72 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Verifies that backups are recent: Windows Server Backup sets and/or the newest file in backup folders.
+
+.DESCRIPTION
+For each computer, optionally lists Windows Server Backup sets (-CheckWbadmin) and optionally inspects
+backup folders (-BackupPaths, local or via the administrative share) to find the newest file. Each result is
+marked OK, Stale (older than -AlertIfOlderThanHours), Failed, Empty Backup Path or Unreachable. Output is an
+HTML report with a summary header, an optional CSV and a log file. If -AlertEmailTo is given and any backup
+is Failed or Stale, an email summary is sent through -SmtpServer (this is the only action outside the report
+folder; nothing else is changed).
+
+.PARAMETER ComputerName
+One or more computers to check. Default: the local machine. Old name: ComputerNames.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write a CSV of the results next to the HTML report.
+
+.PARAMETER AlertIfOlderThanHours
+Backups older than this many hours are marked Stale. Default: 48.
+
+.PARAMETER AlertEmailTo
+Optional recipients for an alert email when backups are Failed or Stale. No email is sent when omitted.
+
+.PARAMETER SmtpServer
+SMTP server used for the alert email. Default: localhost.
+
+.PARAMETER BackupPaths
+Folders (for example D:\Backups) whose newest file is checked. Remote computers are reached via the
+administrative share (\\computer\D$\...).
+
+.PARAMETER CheckWbadmin
+Also query Windows Server Backup sets with Get-WBBackupSet.
+
+.EXAMPLE
+.\Test-BackupStatus.ps1 -BackupPaths D:\Backups -OutputPath D:\Reports
+
+.EXAMPLE
+.\Test-BackupStatus.ps1 -ComputerName SRV01,SRV02 -CheckWbadmin -AlertIfOlderThanHours 30 -AlertEmailTo it@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (Windows Server Backup cmdlets for -CheckWbadmin; SMB access for remote backup paths)
+Permissions:  Local administrator on each target; read access to the backup folders or administrative shares
+When to use:  Daily or weekly backup verification, or to confirm a customer's backups are actually landing before a change window.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string[]]$ComputerNames = @($env:COMPUTERNAME),
+    [Alias('ComputerNames')]
+    [string[]]$ComputerName = @($env:COMPUTERNAME),
 
     [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\BackupVerification_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
 
     [Parameter(Mandatory = $false)]
     [int]$AlertIfOlderThanHours = 48,
@@ -24,13 +84,38 @@ param(
     [switch]$CheckWbadmin
 )
 
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Test-BackupStatus_$stamp.log"
+$htmlPath = Join-Path $outDir "Test-BackupStatus_$stamp.html"
+$csvPath  = Join-Path $outDir "Test-BackupStatus_$stamp.csv"
+
 function Test-WbadminBackup {
     param([string]$ComputerName)
 
     try {
         $Backups = Get-WBBackupSet -ComputerName $ComputerName -ErrorAction Stop
     } catch {
-        Write-Warning "Cannot query Windows Backup on $ComputerName : $($_.Exception.Message)"
+        Write-Log "Cannot query Windows Backup on $ComputerName : $($_.Exception.Message)" 'WARN'
         return @()
     }
 
@@ -140,38 +225,38 @@ function Test-FileBackup {
 
 $AllResults = @()
 
-foreach ($Computer in $ComputerNames) {
-    Write-Host "Checking backups on $Computer..." -ForegroundColor Yellow
+foreach ($Computer in $ComputerName) {
+    Write-Log "Checking backups on $Computer..."
 
     if ($CheckWbadmin) {
-        $WbadminResults = Test-WbadminBackup -ComputerName $Computer
+        $WbadminResults = @(Test-WbadminBackup -ComputerName $Computer)
         $AllResults += $WbadminResults
-        Write-Host "  Windows Backup: $($WbadminResults.Count) sets found" -ForegroundColor Gray
+        Write-Log "Windows Backup on ${Computer}: $($WbadminResults.Count) sets found"
     }
 
     if ($BackupPaths) {
         $FileResults = Test-FileBackup -ComputerName $Computer -Paths $BackupPaths
         $AllResults += $FileResults
-        Write-Host "  File paths checked: $($BackupPaths.Count)" -ForegroundColor Gray
+        Write-Log "File paths checked on ${Computer}: $(@($BackupPaths).Count)"
     }
 }
 
-$FailedCount = ($AllResults | Where-Object { $_.Status -eq "Failed" }).Count
-$StaleCount = ($AllResults | Where-Object { $_.Status -eq "Stale" }).Count
-$OkCount = ($AllResults | Where-Object { $_.Status -eq "OK" }).Count
-$UnreachableCount = ($AllResults | Where-Object { $_.Status -eq "Unreachable" -or $_.Status -eq "Empty Backup Path" }).Count
+$FailedCount = @($AllResults | Where-Object { $_.Status -eq "Failed" }).Count
+$StaleCount = @($AllResults | Where-Object { $_.Status -eq "Stale" }).Count
+$OkCount = @($AllResults | Where-Object { $_.Status -eq "OK" }).Count
+$UnreachableCount = @($AllResults | Where-Object { $_.Status -eq "Unreachable" -or $_.Status -eq "Empty Backup Path" }).Count
 
 if ($AllResults.Count -eq 0) {
-    Write-Host "No backup data found." -ForegroundColor Yellow
+    Write-Log 'No backup data found.' 'WARN'
     return
 }
 
-Write-Host "`n=== Backup Verification Summary ===" -ForegroundColor Cyan
-Write-Host "Total backups checked: $($AllResults.Count)" -ForegroundColor White
-Write-Host "OK: $OkCount" -ForegroundColor Green
-Write-Host "Stale: $StaleCount" -ForegroundColor Yellow
-Write-Host "Failed: $FailedCount" -ForegroundColor Red
-Write-Host "Unreachable/Empty: $UnreachableCount" -ForegroundColor Red
+Write-Log '=== Backup Verification Summary ==='
+Write-Log "Total backups checked: $($AllResults.Count)"
+Write-Log "OK: $OkCount"
+Write-Log "Stale: $StaleCount"
+Write-Log "Failed: $FailedCount"
+Write-Log "Unreachable/Empty: $UnreachableCount"
 
 $HtmlRows = $AllResults | Sort-Object Status, ComputerName | ForEach-Object {
     $RowClass = switch ($_.Status) {
@@ -210,7 +295,7 @@ td { padding: 5px 8px; border-bottom: 1px solid #ddd; }
 <body>
 <h1>Backup Verification Report</h1>
 <div class='summary'>
-    <strong>Servers:</strong> $($ComputerNames.Count) |
+    <strong>Servers:</strong> $(@($ComputerName).Count) |
     <strong>Backups Checked:</strong> $($AllResults.Count) |
     <strong>OK:</strong> $OkCount |
     <strong>Stale:</strong> <span style='color:orange;'>$StaleCount</span> |
@@ -224,12 +309,12 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "`nReport: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $AllResults | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $AllResults | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }
 
 if ($AlertEmailTo -and ($FailedCount -gt 0 -or $StaleCount -gt 0)) {
@@ -243,8 +328,8 @@ if ($AlertEmailTo -and ($FailedCount -gt 0 -or $StaleCount -gt 0)) {
         Send-MailMessage -To $AlertEmailTo -From "backup-monitor@$env:COMPUTERNAME" `
             -Subject "[BACKUP ALERT] $FailedCount failed, $StaleCount stale" -Body $Body `
             -SmtpServer $SmtpServer -ErrorAction Stop
-        Write-Host "Alert sent" -ForegroundColor Yellow
+        Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
     } catch {
-        Write-Warning "Failed to send alert: $($_.Exception.Message)"
+        Write-Log "Failed to send alert: $($_.Exception.Message)" 'WARN'
     }
 }

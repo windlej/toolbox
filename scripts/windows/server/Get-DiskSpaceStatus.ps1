@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Monitors disk space on Windows systems and sends alerts when free space
@@ -7,92 +8,188 @@
 .DESCRIPTION
     This script checks one or more drives for available disk space, compares
     the free percentage against a defined threshold, and triggers alerts via
-    email, Windows Event Log, and/or a log file. Designed for unattended
-    execution via Windows Task Scheduler.
+    email, Teams/Slack webhook, Windows Event Log, and/or a log file. Designed
+    for unattended execution via Windows Task Scheduler.
+
+    Alerting is opt-in: email is sent only when -SmtpServer, -From and -To are all
+    supplied, and webhooks are posted only when a webhook URL is supplied. With none
+    of them the script still logs, writes the history CSV and the Event Log entries.
+
+    Files written to the resolved output folder:
+      - Get-DiskSpaceStatus_<yyyyMMdd_HHmmss>.log  (one log per run)
+      - Get-DiskSpaceStatus_History.csv            (fixed name; one row per drive per run)
+    The history CSV intentionally keeps a fixed name because it accumulates between runs so
+    you can trend free space over time. Because of that, a scheduled task must always use the
+    same -OutputPath (and -CustomerName) so every run appends to the same file.
+
+    Exit code: 0 when all drives are healthy, 1 when at least one drive is below the
+    threshold.
+
+.PARAMETER Drive
+    Drives to check, for example C: or D:. Default: C: and D:. Old name: DrivesToMonitor.
+
+.PARAMETER ThresholdPercent
+    Alert when free space drops below this percentage (1-99). Default: 15.
+
+.PARAMETER OutputPath
+    Folder for the log file and history CSV. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+    Use an explicit path for scheduled tasks (a scheduled task cannot answer the prompt).
+
+.PARAMETER CustomerName
+    Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER SkipEventLog
+    Do not write entries to the Windows Event Log. By default entries are written under the
+    source named by -EventLogSource (creating the source needs an elevated session once).
+
+.PARAMETER EventLogSource
+    Event Log source name. Default: DiskSpaceMonitor.
+
+.PARAMETER EventLogName
+    Event Log to write into. Default: Application.
+
+.PARAMETER SmtpServer
+    SMTP server for email alerts. Email is off unless this, -From and -To are all supplied.
+
+.PARAMETER SmtpPort
+    SMTP port. Default: 587.
+
+.PARAMETER NoSmtpSsl
+    Disable SSL/TLS for the SMTP connection (SSL is on by default).
+
+.PARAMETER From
+    Sender address for email alerts, for example monitor@contoso.com.
+
+.PARAMETER To
+    One or more recipient addresses for email alerts, for example admin@contoso.com.
+
+.PARAMETER EmailSubjectPrefix
+    Prefix for the alert subject. Default: [DISK ALERT].
+
+.PARAMETER SmtpCredential
+    PSCredential for authenticated SMTP. Takes precedence over -SmtpCredentialPath.
+
+.PARAMETER SmtpCredentialPath
+    Path to an encrypted credential file created with Export-Clixml (readable only by the
+    same user on the same machine). If omitted or not found, unauthenticated relay is tried.
+
+.PARAMETER TeamsWebhookUrl
+    Optional Microsoft Teams incoming webhook URL. Teams alerts are off when omitted.
+
+.PARAMETER SlackWebhookUrl
+    Optional Slack incoming webhook URL. Slack alerts are off when omitted.
 
 .PARAMETER WhatIf
-    Runs the script in test/dry-run mode. No emails are sent, no Event Log
-    entries are written, but all disk checks and console output are performed.
+    Dry-run mode (standard PowerShell switch). No emails or webhook posts are sent, no Event
+    Log entries are written and the history CSV is not appended, but all disk checks and
+    console/log output are performed.
 
 .PARAMETER Verbose
     Enables verbose output for detailed execution tracing.
 
 .EXAMPLE
-    # Normal run
-    .\Monitor-DiskSpace.ps1
+    .\Get-DiskSpaceStatus.ps1 -OutputPath D:\Reports
 
-    # Dry-run / test mode (no alerts sent)
-    .\Monitor-DiskSpace.ps1 -WhatIf
+    Checks C: and D: against the 15% default and logs to D:\Reports.
 
-    # Verbose output
-    .\Monitor-DiskSpace.ps1 -Verbose
+.EXAMPLE
+    .\Get-DiskSpaceStatus.ps1 -Drive C:,E: -ThresholdPercent 10 -OutputPath D:\Reports -CustomerName Contoso -WhatIf
+
+    Dry run: checks C: and E: against 10% and sends no alerts.
+
+.EXAMPLE
+    .\Get-DiskSpaceStatus.ps1 -OutputPath D:\Reports -SmtpServer smtp.contoso.com -From monitor@contoso.com -To admin@contoso.com -SmtpCredentialPath D:\Secure\smtp_cred.xml
+
+    Emails admin@contoso.com when a drive is below the threshold.
+
+.EXAMPLE
+    # Scheduled task (daily 06:00). -OutputPath is passed explicitly because a task cannot be prompted.
+    $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "D:\Scripts\Get-DiskSpaceStatus.ps1" -OutputPath "D:\Reports" -ThresholdPercent 15'
+    $trigger = New-ScheduledTaskTrigger -Daily -At 6am
+    Register-ScheduledTask -TaskName 'Disk Space Status' -Action $action -Trigger $trigger -User 'SYSTEM' -RunLevel Highest
 
 .NOTES
-    Author      : Systems Administrator
-    Version     : 2.0.0
-    Last Updated: 2026-04-19
-    Requires    : PowerShell 5.1+, appropriate SMTP credentials if email is enabled
+    Platform:     Windows (PowerShell 5.1+)
+    Permissions:  Local user can read drive free space; Administrator needed once to create the Event Log source; outbound access to the SMTP server or webhook if alerts are used
+    When to use:  Scheduled daily check on a server to catch volumes running low before they fill, or an ad-hoc free-space check during an incident.
+    Safety:       Changes data (supports -WhatIf)
+    Version:      3.0
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
-param ()
+param (
+    [Alias('DrivesToMonitor')]
+    [string[]]$Drive = @('C:', 'D:'),
 
-# ============================================================
-#  SECTION 1 — CONFIGURATION
-#  Edit these variables to match your environment.
-# ============================================================
+    [ValidateRange(1, 99)]
+    [int]$ThresholdPercent = 15,
 
-# --- Drives to monitor (comma-separated) ---
-$DrivesToMonitor    = @('C:', 'D:')
+    [string]$OutputPath,
 
-# --- Alert threshold: alert when free space % drops BELOW this value ---
-$ThresholdPercent   = 15          # Integer, e.g. 15 = 15%
+    [string]$CustomerName,
 
-# --- Log file path (leave empty '' to disable file logging) ---
-$LogFilePath        = 'C:\Logs\DiskMonitor\DiskMonitor.log'
+    [switch]$SkipEventLog,
 
-# --- CSV export path (leave empty '' to disable CSV export) ---
-$CsvExportPath      = 'C:\Logs\DiskMonitor\DiskMonitor_History.csv'
+    [string]$EventLogSource = 'DiskSpaceMonitor',
 
-# --- Windows Event Log settings (set $EnableEventLog = $false to disable) ---
-$EnableEventLog     = $true
-$EventLogSource     = 'DiskSpaceMonitor'   # Custom source name
-$EventLogName       = 'Application'         # Log to write into
+    [string]$EventLogName = 'Application',
 
-# --- Email / SMTP settings (set $EnableEmail = $false to disable) ---
-$EnableEmail        = $true
-$SmtpServer         = 'smtp.yourdomain.com'
-$SmtpPort           = 587
-$SmtpUseSsl         = $true
-$From               = 'monitor@yourdomain.com'
-$To                 = @('admin@yourdomain.com', 'oncall@yourdomain.com')
-$EmailSubjectPrefix = '[DISK ALERT]'
+    [string]$SmtpServer,
 
-# --- Credential handling ---
-# Option A: Prompt interactively (suitable for testing)
-#   $SmtpCredential = Get-Credential
-#
-# Option B: Load from an encrypted XML file created with Export-Clixml
-#   (See "Setting Up Credentials Securely" instructions at the bottom)
-#   $SmtpCredential = Import-Clixml -Path 'C:\Secure\smtp_cred.xml'
-#
-# Option C: No authentication (open relay / no-auth SMTP)
-#   $SmtpCredential = $null
-#
-# Default below uses Option B; change as needed:
-$SmtpCredentialPath = 'C:\Secure\smtp_cred.xml'
-$SmtpCredential     = $null   # Will be populated in the credential-loading section
+    [int]$SmtpPort = 587,
 
-# --- Teams / Slack webhook (set to '' to disable) ---
-$TeamsWebhookUrl    = ''       # Paste your Incoming Webhook URL here
-$SlackWebhookUrl    = ''
+    [switch]$NoSmtpSsl,
 
-# ============================================================
-#  END OF CONFIGURATION — Do not edit below unless needed
-# ============================================================
+    [string]$From,
+
+    [string[]]$To,
+
+    [string]$EmailSubjectPrefix = '[DISK ALERT]',
+
+    [System.Management.Automation.PSCredential]$SmtpCredential,
+
+    [string]$SmtpCredentialPath,
+
+    [string]$TeamsWebhookUrl,
+
+    [string]$SlackWebhookUrl
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+# Derived settings (previously a hardcoded configuration block)
+$EnableEventLog = -not $SkipEventLog
+$SmtpUseSsl     = -not $NoSmtpSsl
+$EnableEmail    = [bool]($SmtpServer -and $From -and $To)
+if ($SmtpServer -or $From -or $To) {
+    if (-not $EnableEmail) {
+        Write-Warning 'Email alerts need -SmtpServer, -From and -To together; email is disabled.'
+    }
+}
+
+# The output folder and log must exist even in -WhatIf (dry-run) mode
+$stamp   = Get-Date -Format 'yyyyMMdd_HHmmss'
+$userWhatIf = $WhatIfPreference
+$WhatIfPreference = $false
+try {
+    $outDir = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+}
+finally {
+    $WhatIfPreference = $userWhatIf
+}
+$script:LogFile = Join-Path $outDir "Get-DiskSpaceStatus_$stamp.log"
+$CsvExportPath  = Join-Path $outDir 'Get-DiskSpaceStatus_History.csv'
 
 # ────────────────────────────────────────────────────────────
 #  HELPER: Timestamp string
@@ -102,7 +199,7 @@ function Get-Timestamp {
 }
 
 # ────────────────────────────────────────────────────────────
-#  HELPER: Write-Log  —  appends a line to the log file AND
+#  HELPER: Write-Log  -  appends a line to the log file AND
 #          writes to the console with colour coding.
 # ────────────────────────────────────────────────────────────
 function Write-Log {
@@ -126,16 +223,12 @@ function Write-Log {
     }
 
     # File logging
-    if ($LogFilePath -ne '') {
+    if ($script:LogFile) {
         try {
-            $logDir = Split-Path $LogFilePath -Parent
-            if (-not (Test-Path $logDir)) {
-                New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-            }
-            Add-Content -Path $LogFilePath -Value $line -Encoding UTF8
+            Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 -WhatIf:$false
         }
         catch {
-            Write-Warning "Could not write to log file '$LogFilePath': $_"
+            Write-Warning "Could not write to log file '$($script:LogFile)': $_"
         }
     }
 }
@@ -147,13 +240,17 @@ function Initialize-EventLogSource {
     if (-not $EnableEventLog) { return }
     try {
         if (-not [System.Diagnostics.EventLog]::SourceExists($EventLogSource)) {
+            if ($WhatIfPreference) {
+                Write-Log "[WhatIf] Would create Event Log source '$EventLogSource' in '$EventLogName'." -Level INFO
+                return
+            }
             New-EventLog -LogName $EventLogName -Source $EventLogSource -ErrorAction Stop
             Write-Log "Created Event Log source '$EventLogSource' in '$EventLogName'." -Level INFO
         }
     }
     catch {
         Write-Log "Could not create Event Log source (requires admin): $_" -Level WARNING
-        # Non-fatal — continue without Event Log
+        # Non-fatal - continue without Event Log
         $script:EnableEventLog = $false
     }
 }
@@ -168,6 +265,10 @@ function Write-EventLogEntry {
         [int]$EventId = 1000
     )
     if (-not $EnableEventLog) { return }
+    if ($WhatIfPreference) {
+        Write-Log "[WhatIf] Would write Event Log entry ($EntryType, $EventId)." -Level INFO
+        return
+    }
     try {
         Write-EventLog -LogName $EventLogName -Source $EventLogSource `
                        -EntryType $EntryType -EventId $EventId -Message $Message
@@ -178,17 +279,17 @@ function Write-EventLogEntry {
 }
 
 # ────────────────────────────────────────────────────────────
-#  HELPER: Load SMTP credential from encrypted XML
+#  HELPER: Load SMTP credential (parameter, else encrypted XML)
 # ────────────────────────────────────────────────────────────
 function Get-SmtpCredential {
     if (-not $EnableEmail) { return $null }
 
-    # If caller already set $SmtpCredential, use it as-is
+    # If caller supplied -SmtpCredential, use it as-is
     if ($null -ne $SmtpCredential) { return $SmtpCredential }
 
-    if ($SmtpCredentialPath -ne '' -and (Test-Path $SmtpCredentialPath)) {
+    if ($SmtpCredentialPath -and (Test-Path -LiteralPath $SmtpCredentialPath)) {
         try {
-            $cred = Import-Clixml -Path $SmtpCredentialPath -ErrorAction Stop
+            $cred = Import-Clixml -LiteralPath $SmtpCredentialPath -ErrorAction Stop
             Write-Log "SMTP credential loaded from '$SmtpCredentialPath'." -Level INFO
             return $cred
         }
@@ -197,7 +298,7 @@ function Get-SmtpCredential {
         }
     }
     else {
-        Write-Log "SMTP credential file not found at '$SmtpCredentialPath'. Attempting unauthenticated relay." -Level WARNING
+        Write-Log 'No SMTP credential supplied or file not found. Attempting unauthenticated relay.' -Level WARNING
     }
     return $null
 }
@@ -248,7 +349,7 @@ function Send-EmailAlert {
 function Send-TeamsAlert {
     param ([string]$Message)
 
-    if ($TeamsWebhookUrl -eq '') { return }
+    if (-not $TeamsWebhookUrl) { return }
     if ($WhatIfPreference) {
         Write-Log "[WhatIf] Would post Teams message: $Message" -Level INFO
         return
@@ -266,7 +367,7 @@ function Send-TeamsAlert {
 
         Invoke-RestMethod -Uri $TeamsWebhookUrl -Method Post `
                           -ContentType 'application/json' -Body $payload -ErrorAction Stop
-        Write-Log "Teams alert sent." -Level INFO
+        Write-Log 'Teams alert sent.' -Level INFO
     }
     catch {
         Write-Log "Failed to send Teams alert: $_" -Level ERROR
@@ -279,7 +380,7 @@ function Send-TeamsAlert {
 function Send-SlackAlert {
     param ([string]$Message)
 
-    if ($SlackWebhookUrl -eq '') { return }
+    if (-not $SlackWebhookUrl) { return }
     if ($WhatIfPreference) {
         Write-Log "[WhatIf] Would post Slack message: $Message" -Level INFO
         return
@@ -289,7 +390,7 @@ function Send-SlackAlert {
         $payload = @{ text = $Message } | ConvertTo-Json
         Invoke-RestMethod -Uri $SlackWebhookUrl -Method Post `
                           -ContentType 'application/json' -Body $payload -ErrorAction Stop
-        Write-Log "Slack alert sent." -Level INFO
+        Write-Log 'Slack alert sent.' -Level INFO
     }
     catch {
         Write-Log "Failed to send Slack alert: $_" -Level ERROR
@@ -302,14 +403,9 @@ function Send-SlackAlert {
 function Export-CsvRow {
     param ([PSCustomObject]$Row)
 
-    if ($CsvExportPath -eq '') { return }
     try {
-        $csvDir = Split-Path $CsvExportPath -Parent
-        if (-not (Test-Path $csvDir)) {
-            New-Item -ItemType Directory -Path $csvDir -Force | Out-Null
-        }
         # Export-Csv with -Append avoids overwriting existing history
-        $Row | Export-Csv -Path $CsvExportPath -Append -NoTypeInformation -Encoding UTF8
+        $Row | Export-Csv -LiteralPath $CsvExportPath -Append -NoTypeInformation -Encoding UTF8
     }
     catch {
         Write-Log "CSV export failed: $_" -Level WARNING
@@ -354,7 +450,7 @@ function Test-DriveSpace {
 
         $totalBytes = $psDrive.Used + $psDrive.Free
         if ($totalBytes -eq 0) {
-            throw "Drive reports zero total size — may be unmounted or offline."
+            throw 'Drive reports zero total size - may be unmounted or offline.'
         }
 
         $freePercent = [math]::Round(($psDrive.Free / $totalBytes) * 100, 1)
@@ -396,7 +492,8 @@ function Test-DriveSpace {
 
 Write-Log '=================================================' -Level INFO
 Write-Log "Disk Space Monitor started. Threshold: $ThresholdPercent%" -Level INFO
-Write-Log "Monitoring drives: $($DrivesToMonitor -join ', ')" -Level INFO
+Write-Log "Monitoring drives: $($Drive -join ', ')" -Level INFO
+Write-Log "Log file: $script:LogFile" -Level INFO
 if ($WhatIfPreference) {
     Write-Log '[WhatIf / Test Mode] No alerts will be sent.' -Level WARNING
 }
@@ -411,18 +508,18 @@ $resolvedCredential = Get-SmtpCredential
 $allResults     = [System.Collections.Generic.List[PSCustomObject]]::new()
 $alertMessages  = [System.Collections.Generic.List[string]]::new()
 
-foreach ($driveLetter in $DrivesToMonitor) {
+foreach ($driveLetter in $Drive) {
     $res = Test-DriveSpace -DriveLetter $driveLetter
 
     # Build console / log output line
     switch ($res.Status) {
         'OK' {
-            $line = "Drive $($res.Drive): Healthy — $($res.FreePercent)% free " +
+            $line = "Drive $($res.Drive): Healthy - $($res.FreePercent)% free " +
                     "($($res.FreeGB) GB free of $($res.TotalGB) GB total)"
             Write-Log $line -Level INFO
         }
         'WARNING' {
-            $line = "WARNING: Drive $($res.Drive): LOW DISK SPACE — " +
+            $line = "WARNING: Drive $($res.Drive): LOW DISK SPACE - " +
                     "$($res.FreePercent)% free ($($res.FreeGB) GB free of $($res.TotalGB) GB total)"
             Write-Log $line -Level ALERT
             $alertMessages.Add($line)
@@ -432,7 +529,7 @@ foreach ($driveLetter in $DrivesToMonitor) {
                                 -EntryType Warning -EventId 1001
         }
         default {
-            $line = "Drive $($res.Drive): Status=$($res.Status) — $($res.ErrorMessage)"
+            $line = "Drive $($res.Drive): Status=$($res.Status) - $($res.ErrorMessage)"
             Write-Log $line -Level ERROR
 
             # Log errors to Event Log as errors
@@ -453,7 +550,7 @@ foreach ($driveLetter in $DrivesToMonitor) {
 if ($alertMessages.Count -gt 0) {
 
     $alertBody = @"
-DISK SPACE ALERT — $(Get-Timestamp)
+DISK SPACE ALERT - $(Get-Timestamp)
 Computer : $env:COMPUTERNAME
 Script    : $PSCommandPath
 
@@ -480,7 +577,7 @@ Please take corrective action (clean up files, extend volume, etc.).
     Write-Log "Alert cycle complete. $($alertMessages.Count) drive(s) in WARNING state." -Level ALERT
 }
 else {
-    $okCount = ($allResults | Where-Object Status -eq 'OK').Count
+    $okCount = @($allResults | Where-Object Status -eq 'OK').Count
     Write-Log "All $okCount monitored drive(s) are within healthy thresholds." -Level INFO
 
     # Informational Event Log entry on clean run

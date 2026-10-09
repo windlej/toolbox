@@ -1,12 +1,70 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Audits NTFS permissions on one or more folder trees and writes an HTML report (optional CSV).
+
+.DESCRIPTION
+Walks each path in -Paths down to -MaxDepth levels (folders plus common document file types) and records
+every access control entry: identity, rights, allow/deny, owner and whether it is inherited. Local-machine
+accounts and inherited entries are hidden unless you ask for them. The HTML report highlights Deny entries
+and FullControl grants. With -ReportUnusedShares it also enumerates SMB shares on the target computers
+(collected in memory; the share list is not currently included in the HTML or CSV).
+
+.PARAMETER Paths
+One or more folder paths (local or UNC) to audit, for example D:\Shares\Finance.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write a CSV of all permission entries next to the HTML report.
+
+.PARAMETER MaxDepth
+How many folder levels below each path to scan. Default: 3.
+
+.PARAMETER IncludeInherited
+Include inherited entries (by default only explicit entries are listed).
+
+.PARAMETER IncludeLocalUsers
+Include entries for local machine accounts (COMPUTERNAME\...), which are hidden by default.
+
+.PARAMETER ReportUnusedShares
+Also enumerate SMB shares on the computers in -ComputerName.
+
+.PARAMETER ComputerName
+Computers whose SMB shares are enumerated when -ReportUnusedShares is used. Default: the local machine.
+Old name: ShareComputers.
+
+.EXAMPLE
+.\Get-FileServerPermissionReport.ps1 -Paths D:\Shares\Finance -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-FileServerPermissionReport.ps1 -Paths D:\Shares\Finance,D:\Shares\HR -MaxDepth 2 -IncludeInherited -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (file server or any host that can reach the paths)
+Permissions:  Read and read-permissions (READ_CONTROL) on the scanned folders; local admin or Backup Operators on a file server is typical
+When to use:  Access reviews, tracking down who has FullControl or explicit Deny on a share, or before a file server migration.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string[]]$Paths,
 
     [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\FileServerAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
 
     [Parameter(Mandatory = $false)]
     [int]$MaxDepth = 3,
@@ -21,8 +79,34 @@ param(
     [switch]$ReportUnusedShares,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$ShareComputers
+    [Alias('ShareComputers')]
+    [string[]]$ComputerName = @($env:COMPUTERNAME)
 )
+
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Get-FileServerPermissionReport_$stamp.log"
+$htmlPath = Join-Path $outDir "Get-FileServerPermissionReport_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-FileServerPermissionReport_$stamp.csv"
 
 function Get-PermissionReport {
     param(
@@ -37,7 +121,7 @@ function Get-PermissionReport {
     try {
         $Acl = Get-Acl -Path $Path -ErrorAction Stop
     } catch {
-        Write-Warning "Cannot access $Path : $($_.Exception.Message)"
+        Write-Log "Cannot access $Path : $($_.Exception.Message)" 'WARN'
         return @()
     }
 
@@ -92,7 +176,7 @@ function Get-ShareReport {
         try {
             $Shares = Get-CimInstance -ComputerName $Computer -ClassName Win32_Share -Filter "Type = 0" -ErrorAction Stop
         } catch {
-            Write-Warning "Cannot enumerate shares on $Computer : $($_.Exception.Message)"
+            Write-Log "Cannot enumerate shares on $Computer : $($_.Exception.Message)" 'WARN'
             continue
         }
 
@@ -122,16 +206,16 @@ function Get-ShareReport {
     return $Results
 }
 
-Write-Host "=== File Server Permission Audit ===" -ForegroundColor Cyan
+Write-Log '=== File Server Permission Audit ==='
 
 $AllPermissions = @()
 
 foreach ($Path in $Paths) {
-    Write-Host "Scanning $Path..." -ForegroundColor Yellow
+    Write-Log "Scanning $Path..."
     $AllPermissions += Get-PermissionReport -Path $Path -Depth 0
 }
 
-Write-Host "Total permission entries: $($AllPermissions.Count)" -ForegroundColor White
+Write-Log "Total permission entries: $($AllPermissions.Count)"
 
 $UniquePaths = ($AllPermissions | Select-Object -ExpandProperty Path -Unique).Count
 $UniqueIdentities = ($AllPermissions | Select-Object -ExpandProperty Identity -Unique).Count
@@ -140,17 +224,17 @@ $ExplicitPermissions = $AllPermissions | Where-Object { -not $_.IsInherited }
 $DenyPermissions = $AllPermissions | Where-Object { $_.AccessType -eq "Deny" }
 $FullControlPermissions = $AllPermissions | Where-Object { $_.Rights -match "FullControl" }
 
-Write-Host "Unique folders/files: $UniquePaths" -ForegroundColor Gray
-Write-Host "Unique identities: $UniqueIdentities" -ForegroundColor Gray
-Write-Host "Explicit (non-inherited) ACEs: $($ExplicitPermissions.Count)" -ForegroundColor Yellow
-Write-Host "Deny entries: $($DenyPermissions.Count)" -ForegroundColor Red
-Write-Host "FullControl entries: $($FullControlPermissions.Count)" -ForegroundColor Yellow
+Write-Log "Unique folders/files: $UniquePaths"
+Write-Log "Unique identities: $UniqueIdentities"
+Write-Log "Explicit (non-inherited) ACEs: $(@($ExplicitPermissions).Count)"
+Write-Log "Deny entries: $(@($DenyPermissions).Count)"
+Write-Log "FullControl entries: $(@($FullControlPermissions).Count)"
 
 $ShareResults = @()
-if ($ReportUnusedShares -and $ShareComputers) {
-    Write-Host "`nEnumerating shares..." -ForegroundColor Cyan
-    $ShareResults = Get-ShareReport -Computers $ShareComputers
-    Write-Host "Found $($ShareResults.Count) shares" -ForegroundColor Gray
+if ($ReportUnusedShares -and $ComputerName) {
+    Write-Log 'Enumerating shares...'
+    $ShareResults = Get-ShareReport -Computers $ComputerName
+    Write-Log "Found $(@($ShareResults).Count) shares"
 }
 
 $HtmlRows = $AllPermissions | Sort-Object Path | ForEach-Object {
@@ -193,9 +277,9 @@ td { padding: 4px 6px; border-bottom: 1px solid #ddd; font-family: 'Consolas', m
     <strong>Total ACEs:</strong> $($AllPermissions.Count) |
     <strong>Unique Folders/Files:</strong> $UniquePaths |
     <strong>Unique Identities:</strong> $UniqueIdentities |
-    <strong>Explicit:</strong> $($ExplicitPermissions.Count) |
-    <strong>Deny:</strong> $($DenyPermissions.Count) |
-    <strong>FullControl:</strong> $($FullControlPermissions.Count)<br>
+    <strong>Explicit:</strong> $(@($ExplicitPermissions).Count) |
+    <strong>Deny:</strong> $(@($DenyPermissions).Count) |
+    <strong>FullControl:</strong> $(@($FullControlPermissions).Count)<br>
     <strong>Scan Depth:</strong> $MaxDepth |
     <strong>Include Inherited:</strong> $IncludeInherited
 </div>
@@ -206,11 +290,11 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "`nReport: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
+if ($ExportCsv) {
     $AllPermissions | Select-Object Path, Name, Type, Identity, Rights, AccessType, Owner, IsInherited, Depth |
-        Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+        Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }

@@ -1,6 +1,60 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Checks that key Windows services are running on one or more servers and reports the result as HTML (optional CSV).
+
+.DESCRIPTION
+For each computer, looks up each service in -ServiceNames and classifies it: Healthy (running), Critical
+(stopped but set to start automatically), Stopped (stopped, manual or disabled), Degraded (any other state,
+for example starting or stopping) or Unknown (service not found). The default list covers common infrastructure
+services (IIS, SQL Server, DNS, AD DS, DHCP, file sharing, WinRM and others). Output is an HTML report with a
+summary header, an optional CSV and a log file. If -AlertEmailTo is given and any service is Critical, an
+email is sent through -SmtpServer; nothing else is changed.
+
+.PARAMETER ComputerName
+One or more computers to check. Default: the local machine. Old name: ComputerNames.
+
+.PARAMETER ServiceNames
+Service (short) names to check. Default: W3SVC, MSSQLSERVER, DNS, NTDS, Netlogon, Spooler, DHCP,
+LanmanServer, LanmanWorkstation, WinRM, RpcSs, EventLog, W32Time, gpsvc.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write a CSV of the results next to the HTML report.
+
+.PARAMETER AlertEmailTo
+Optional recipients for an alert email when any service is Critical. No email is sent when omitted.
+
+.PARAMETER SmtpServer
+SMTP server used for the alert email. Default: localhost.
+
+.PARAMETER ShowAllServices
+Accepted for compatibility; not used by the current logic.
+
+.EXAMPLE
+.\Test-ServiceHealth.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Test-ServiceHealth.ps1 -ComputerName SRV01,SRV02 -ServiceNames W3SVC,MSSQLSERVER -AlertEmailTo it@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (Windows PowerShell 5.1 for remote Get-Service -ComputerName; WMI/CIM access to targets)
+Permissions:  Local administrator (or remote service query rights) on each target computer
+When to use:  After patching or a reboot to confirm services came back, or as a routine health check on application and infrastructure servers.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string[]]$ComputerNames = @($env:COMPUTERNAME),
+    [Alias('ComputerNames')]
+    [string[]]$ComputerName = @($env:COMPUTERNAME),
 
     [Parameter(Mandatory = $false)]
     [string[]]$ServiceNames = @(
@@ -10,10 +64,13 @@ param(
     ),
 
     [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\ServiceHealthReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
 
     [Parameter(Mandatory = $false)]
     [string[]]$AlertEmailTo,
@@ -25,6 +82,31 @@ param(
     [switch]$ShowAllServices
 )
 
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Test-ServiceHealth_$stamp.log"
+$htmlPath = Join-Path $outDir "Test-ServiceHealth_$stamp.html"
+$csvPath  = Join-Path $outDir "Test-ServiceHealth_$stamp.csv"
+
 function Get-ServiceStatus {
     param(
         [string]$ComputerName,
@@ -34,7 +116,7 @@ function Get-ServiceStatus {
     try {
         $AllServices = Get-Service -ComputerName $ComputerName -ErrorAction Stop
     } catch {
-        Write-Warning "Cannot connect to $ComputerName : $($_.Exception.Message)"
+        Write-Log "Cannot connect to $ComputerName : $($_.Exception.Message)" 'WARN'
         return @()
     }
 
@@ -81,25 +163,25 @@ function Get-ServiceStatus {
 
 $AllResults = @()
 
-foreach ($Computer in $ComputerNames) {
-    Write-Host "Checking services on $Computer..." -ForegroundColor Yellow
+foreach ($Computer in $ComputerName) {
+    Write-Log "Checking services on $Computer..."
     $AllResults += Get-ServiceStatus -ComputerName $Computer -Services $ServiceNames
 }
 
-$CriticalServices = $AllResults | Where-Object { $_.Health -eq "Critical" }
-$DegradedServices = $AllResults | Where-Object { $_.Health -eq "Degraded" }
-$MissingServices = $AllResults | Where-Object { $_.Health -eq "Unknown" }
+$CriticalServices = @($AllResults | Where-Object { $_.Health -eq "Critical" })
+$DegradedServices = @($AllResults | Where-Object { $_.Health -eq "Degraded" })
+$MissingServices = @($AllResults | Where-Object { $_.Health -eq "Unknown" })
 
-Write-Host "`n=== Service Health Summary ===" -ForegroundColor Cyan
-Write-Host "Total services checked: $($AllResults.Count)" -ForegroundColor White
-Write-Host "Healthy: $(($AllResults | Where-Object { $_.Health -eq "Healthy" }).Count)" -ForegroundColor Green
-Write-Host "Critical (auto-start stopped): $($CriticalServices.Count)" -ForegroundColor Red
-Write-Host "Stopped (manual): $(($AllResults | Where-Object { $_.Health -eq "Stopped" }).Count)" -ForegroundColor Gray
-Write-Host "Degraded: $($DegradedServices.Count)" -ForegroundColor Yellow
-Write-Host "Missing: $($MissingServices.Count)" -ForegroundColor Red
+Write-Log '=== Service Health Summary ==='
+Write-Log "Total services checked: $($AllResults.Count)"
+Write-Log "Healthy: $(@($AllResults | Where-Object { $_.Health -eq 'Healthy' }).Count)"
+Write-Log "Critical (auto-start stopped): $($CriticalServices.Count)"
+Write-Log "Stopped (manual): $(@($AllResults | Where-Object { $_.Health -eq 'Stopped' }).Count)"
+Write-Log "Degraded: $($DegradedServices.Count)"
+Write-Log "Missing: $($MissingServices.Count)"
 
 foreach ($Svc in $CriticalServices) {
-    Write-Host "CRITICAL: $($Svc.ComputerName) - $($Svc.ServiceName) ($($Svc.DisplayName)) is STOPPED (start type: $($Svc.StartType))" -ForegroundColor Red
+    Write-Log "CRITICAL: $($Svc.ComputerName) - $($Svc.ServiceName) ($($Svc.DisplayName)) is STOPPED (start type: $($Svc.StartType))" 'ERROR'
 }
 
 $HtmlRows = $AllResults | Sort-Object Health, ComputerName, ServiceName | ForEach-Object {
@@ -136,9 +218,9 @@ td { padding: 6px 8px; border-bottom: 1px solid #ddd; }
 <body>
 <h1>Service Health Monitoring Report</h1>
 <div class='summary'>
-    <strong>Servers:</strong> $($ComputerNames.Count) |
-    <strong>Services Monitored:</strong> $($ServiceNames.Count) |
-    <strong>Healthy:</strong> $(($AllResults | Where-Object { $_.Health -eq "Healthy" }).Count) |
+    <strong>Servers:</strong> $(@($ComputerName).Count) |
+    <strong>Services Monitored:</strong> $(@($ServiceNames).Count) |
+    <strong>Healthy:</strong> $(@($AllResults | Where-Object { $_.Health -eq "Healthy" }).Count) |
     <strong>Critical:</strong> <span style='color:red;'>$($CriticalServices.Count)</span> |
     <strong>Degraded:</strong> <span style='color:orange;'>$($DegradedServices.Count)</span> |
     <strong>Missing:</strong> <span style='color:red;'>$($MissingServices.Count)</span>
@@ -150,12 +232,12 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "`nReport: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
-    $AllResults | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv) {
+    $AllResults | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }
 
 if ($AlertEmailTo -and $CriticalServices.Count -gt 0) {
@@ -167,8 +249,8 @@ if ($AlertEmailTo -and $CriticalServices.Count -gt 0) {
         Send-MailMessage -To $AlertEmailTo -From "svc-monitor@$env:COMPUTERNAME" `
             -Subject "[SERVICE ALERT] $($CriticalServices.Count) critical services" -Body $Body `
             -SmtpServer $SmtpServer -ErrorAction Stop
-        Write-Host "Alert sent to $($AlertEmailTo -join ', ')" -ForegroundColor Yellow
+        Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
     } catch {
-        Write-Warning "Failed to send alert: $($_.Exception.Message)"
+        Write-Log "Failed to send alert: $($_.Exception.Message)" 'WARN'
     }
 }

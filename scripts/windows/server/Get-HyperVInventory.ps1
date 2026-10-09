@@ -1,12 +1,63 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Inventories virtual machines on one or more Hyper-V hosts and writes an HTML report (optional CSV).
+
+.DESCRIPTION
+Connects to each host with the Hyper-V PowerShell module and lists every VM with state, vCPU count,
+startup memory, uptime, generation, status and configuration version. Optional switches also collect
+snapshots, network adapters and virtual hard disks per VM (held in memory; the HTML and CSV show the
+snapshot count). Output is an HTML report with a summary header, plus an optional CSV.
+
+.PARAMETER ComputerName
+One or more Hyper-V hosts. Default: the local machine. Old name: HyperVHosts.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write a CSV of the VM list next to the HTML report.
+
+.PARAMETER IncludeSnapshots
+Collect checkpoint (snapshot) details and show a snapshot badge next to VMs that have them.
+
+.PARAMETER IncludeNetworks
+Collect virtual network adapter details for each VM.
+
+.PARAMETER IncludeStorage
+Collect virtual hard disk details for each VM.
+
+.EXAMPLE
+.\Get-HyperVInventory.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-HyperVInventory.ps1 -ComputerName HV01,HV02 -IncludeSnapshots -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (Hyper-V PowerShell module on the machine running the script)
+Permissions:  Hyper-V Administrators (or local admin) on each host; WinRM/WMI access for remote hosts
+When to use:  Capacity planning, documenting a customer's virtual estate, or finding VMs with forgotten snapshots before maintenance.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string[]]$HyperVHosts = @($env:COMPUTERNAME),
+    [Alias('HyperVHosts')]
+    [string[]]$ComputerName = @($env:COMPUTERNAME),
 
     [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\HyperV_Inventory_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
+    [string]$OutputPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
+    [string]$CustomerName,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
 
     [Parameter(Mandatory = $false)]
     [switch]$IncludeSnapshots,
@@ -18,6 +69,31 @@ param(
     [switch]$IncludeStorage
 )
 
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Get-HyperVInventory_$stamp.log"
+$htmlPath = Join-Path $outDir "Get-HyperVInventory_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-HyperVInventory_$stamp.csv"
+
 function Get-VMDetail {
     param([string]$HostName)
 
@@ -28,13 +104,13 @@ function Get-VMDetail {
             Import-Module Hyper-V -ErrorAction Stop
             $VMs = Get-VM -ComputerName $HostName
         } catch {
-            Write-Warning "Cannot connect to Hyper-V on $HostName (requires Hyper-V module or admin rights)"
+            Write-Log "Cannot connect to Hyper-V on $HostName (requires Hyper-V module or admin rights)" 'WARN'
             return @()
         }
     }
 
     if (-not $VMs) {
-        Write-Host "  No VMs found on $HostName" -ForegroundColor Gray
+        Write-Log "No VMs found on $HostName"
         return @()
     }
 
@@ -118,22 +194,22 @@ function Get-VMDetail {
 
 $AllVMs = @()
 
-foreach ($Host in $HyperVHosts) {
-    Write-Host "Inventorying VMs on $Host..." -ForegroundColor Yellow
-    $VMs = Get-VMDetail -HostName $Host
+foreach ($HvHost in $ComputerName) {
+    Write-Log "Inventorying VMs on $HvHost..."
+    $VMs = @(Get-VMDetail -HostName $HvHost)
     $AllVMs += $VMs
-    Write-Host "  Found $($VMs.Count) VMs" -ForegroundColor Green
+    Write-Log "Found $($VMs.Count) VMs on $HvHost"
 }
 
-$RunningVMs = ($AllVMs | Where-Object { $_.State -eq "Running" }).Count
-$StoppedVMs = ($AllVMs | Where-Object { $_.State -eq "Off" }).Count
+$RunningVMs = @($AllVMs | Where-Object { $_.State -eq "Running" }).Count
+$StoppedVMs = @($AllVMs | Where-Object { $_.State -eq "Off" }).Count
 $TotalMemory = ($AllVMs | Where-Object { $_.State -eq "Running" } | Measure-Object -Property MemoryGB -Sum).Sum
 
-Write-Host "`n=== Hyper-V Inventory Summary ===" -ForegroundColor Cyan
-Write-Host "Total VMs: $($AllVMs.Count)" -ForegroundColor White
-Write-Host "Running: $RunningVMs" -ForegroundColor Green
-Write-Host "Stopped: $StoppedVMs" -ForegroundColor Gray
-Write-Host "Total Allocated Memory: $TotalMemory GB" -ForegroundColor Yellow
+Write-Log '=== Hyper-V Inventory Summary ==='
+Write-Log "Total VMs: $($AllVMs.Count)"
+Write-Log "Running: $RunningVMs"
+Write-Log "Stopped: $StoppedVMs"
+Write-Log "Total Allocated Memory: $TotalMemory GB"
 
 $HtmlRows = $AllVMs | Sort-Object HostName, VmName | ForEach-Object {
     $RowClass = if ($_.State -eq "Running") { "" } else { "stopped" }
@@ -167,7 +243,7 @@ tr:hover { background: #f5f5f5; }
 <body>
 <h1>Hyper-V VM Inventory Report</h1>
 <div class='summary'>
-    <strong>Hosts:</strong> $($HyperVHosts.Count) |
+    <strong>Hosts:</strong> $(@($ComputerName).Count) |
     <strong>Total VMs:</strong> $($AllVMs.Count) |
     <strong>Running:</strong> $RunningVMs |
     <strong>Stopped:</strong> $StoppedVMs |
@@ -180,11 +256,11 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "`nReport: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report written: $htmlPath"
 
-if ($CsvPath) {
+if ($ExportCsv) {
     $CsvData = $AllVMs | Select-Object HostName, VmName, State, CpuCount, MemoryGB, Uptime, Status, Generation, Version, SnapshotCount
-    $CsvData | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+    $CsvData | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV written: $csvPath"
 }
