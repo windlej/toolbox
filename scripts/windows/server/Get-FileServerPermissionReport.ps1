@@ -9,7 +9,8 @@ Walks each path in -Paths down to -MaxDepth levels (folders plus common document
 every access control entry: identity, rights, allow/deny, owner and whether it is inherited. Local-machine
 accounts and inherited entries are hidden unless you ask for them. The HTML report highlights Deny entries
 and FullControl grants. With -ReportUnusedShares it also enumerates SMB shares on the target computers
-(collected in memory; the share list is not currently included in the HTML or CSV).
+(with their share-level permissions) and adds them as a second table in the HTML and, with -ExportCsv, as a
+separate CSV. The script lists the shares; it does not determine whether a share is in use.
 
 .PARAMETER Paths
 One or more folder paths (local or UNC) to audit, for example D:\Shares\Finance.
@@ -33,7 +34,8 @@ Include inherited entries (by default only explicit entries are listed).
 Include entries for local machine accounts (COMPUTERNAME\...), which are hidden by default.
 
 .PARAMETER ReportUnusedShares
-Also enumerate SMB shares on the computers in -ComputerName.
+Also enumerate SMB shares (and their share permissions) on the computers in -ComputerName. The list is added
+to the HTML report and, with -ExportCsv, written to a separate _Shares CSV.
 
 .PARAMETER ComputerName
 Computers whose SMB shares are enumerated when -ReportUnusedShares is used. Default: the local machine.
@@ -141,7 +143,7 @@ function Get-PermissionReport {
 
         [PSCustomObject]@{
             Path        = $Path
-            Name        = $Item.Name
+            Name        = if ($Item) { $Item.Name } else { Split-Path -Path $Path -Leaf }
             Type        = if ($IsDirectory) { "Directory" } else { "File" }
             Identity    = $Access.IdentityReference.Value
             Rights      = $Access.FileSystemRights.ToString()
@@ -182,15 +184,13 @@ function Get-ShareReport {
         }
 
         foreach ($Share in $Shares) {
-            $SecDescriptor = try {
-                Get-SmbShare -Name $Share.Name -CimSession $Computer -ErrorAction SilentlyContinue
-            } catch { $null }
-
             $Permissions = @()
 
-            if ($SecDescriptor) {
-                $Permissions = $SecDescriptor.SecurityDescriptor.Access |
-                    ForEach-Object { "$($_.AccountName)=$($_.AccessRight)" }
+            try {
+                $Permissions = @(Get-SmbShareAccess -Name $Share.Name -CimSession $Computer -ErrorAction Stop |
+                    ForEach-Object { "$($_.AccountName)=$($_.AccessControlType):$($_.AccessRight)" })
+            } catch {
+                Write-Log "Cannot read share permissions for $($Share.Name) on $Computer : $($_.Exception.Message)" 'WARN'
             }
 
             $Results += [PSCustomObject]@{
@@ -256,6 +256,27 @@ $HtmlRows = $AllPermissions | Sort-Object Path | ForEach-Object {
     </tr>"
 }
 
+$ShareHtml = ''
+if ($ReportUnusedShares) {
+    $ShareRows = @($ShareResults | Sort-Object ComputerName, ShareName | ForEach-Object {
+        "<tr>
+        <td>$([System.Net.WebUtility]::HtmlEncode([string]$_.ComputerName))</td>
+        <td>$([System.Net.WebUtility]::HtmlEncode([string]$_.ShareName))</td>
+        <td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Path))</td>
+        <td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Description))</td>
+        <td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Permissions))</td>
+        <td>$($_.IsSpecial)</td>
+    </tr>"
+    })
+    $ShareHtml = @"
+<h2>SMB Shares ($($ShareRows.Count))</h2>
+<table>
+<tr><th>Computer</th><th>Share</th><th>Path</th><th>Description</th><th>Share Permissions</th><th>Special</th></tr>
+$($ShareRows -join "`n")
+</table>
+"@
+}
+
 $Html = @"
 <!DOCTYPE html>
 <html>
@@ -288,6 +309,7 @@ td { padding: 4px 6px; border-bottom: 1px solid #ddd; font-family: 'Consolas', m
 <tr><th>Path</th><th>Identity</th><th>Rights</th><th>Type</th><th>Owner</th><th>Inherited</th></tr>
 $($HtmlRows -join "`n")
 </table>
+$ShareHtml
 </body></html>
 "@
 
@@ -298,4 +320,9 @@ if ($ExportCsv) {
     $AllPermissions | Select-Object Path, Name, Type, Identity, Rights, AccessType, Owner, IsInherited, Depth |
         Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
     Write-Log "CSV written: $csvPath"
+    if ($ReportUnusedShares) {
+        $shareCsvPath = Join-Path $outDir "Get-FileServerPermissionReport_Shares_$stamp.csv"
+        $ShareResults | Export-Csv -LiteralPath $shareCsvPath -NoTypeInformation -Encoding UTF8
+        Write-Log "Share CSV written: $shareCsvPath"
+    }
 }
