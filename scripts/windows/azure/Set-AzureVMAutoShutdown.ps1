@@ -28,8 +28,8 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 Also write the results to a CSV next to the HTML report.
 
 .PARAMETER DefaultShutdownTime
-Daily shutdown time in HHmm 24-hour format, for example 1900. Default: "19:00" (kept from the original script;
-the DevTest API expects HHmm, so use 1900 style values if the schedule is rejected).
+Daily shutdown time in HHmm 24-hour format with no colon, for example 1900 (the format the Microsoft.DevTestLab
+schedule API expects). Default: 1900. Values such as "19:00" or "2460" are rejected at parameter binding.
 
 .PARAMETER DefaultTimeZone
 Windows time zone id for the schedule. Default: Eastern Standard Time. Use the customer's zone (tzutil /l).
@@ -51,7 +51,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts, Az.Resources and Az.Com
 Permissions:  Azure RBAC Reader to audit; Contributor (or Virtual Machine Contributor) on the VMs when using -ApplySchedules
 When to use:  Cost control for dev/test subscriptions where VMs are left running overnight; run read-only first, then apply with -WhatIf before the real run.
 Safety:       Changes data (supports -WhatIf)
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -63,7 +63,8 @@ param(
 
     [switch]$ExportCsv,
 
-    [string]$DefaultShutdownTime = "19:00",
+    [ValidatePattern('^([01]\d|2[0-3])[0-5]\d$')]
+    [string]$DefaultShutdownTime = "1900",
 
     [string]$DefaultTimeZone = "Eastern Standard Time",
 
