@@ -30,10 +30,12 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 Also write the results to a CSV next to the HTML report.
 
 .PARAMETER RequiredTags
-Tag names every resource must have. Mandatory; for example Environment, Owner, CostCenter.
+Tag names every resource must have. Optional. Default: Environment, Owner, CostCenter.
 
 .PARAMETER EnforcedTagValues
 Optional list of "Tag=Value" entries. A required tag listed here must equal that value to be compliant.
+Every tag named here must also be in -RequiredTags, and each entry must be Tag=Value (the value may itself
+contain '='); otherwise the script stops before doing anything.
 
 .PARAMETER ApplyTags
 Add missing required tags (value from -DefaultValue). Without this switch the script is read-only.
@@ -55,7 +57,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources modules
 Permissions:  Azure RBAC Reader to audit; Tag Contributor (or Contributor) on the scope when using -ApplyTags
 When to use:  Tag governance clean-up before a cost-allocation exercise or policy rollout; run without -ApplyTags first and review the report.
 Safety:       Changes data (supports -WhatIf)
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -67,7 +69,7 @@ param(
 
     [switch]$ExportCsv,
 
-    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
     [string[]]$RequiredTags = @("Environment", "Owner", "CostCenter"),
 
     [string[]]$EnforcedTagValues,
@@ -96,6 +98,19 @@ function Write-Log {
     $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
     Write-Host $line
     if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$EnforcedMap = @{}
+foreach ($Entry in @($EnforcedTagValues)) {
+    if ([string]::IsNullOrEmpty($Entry)) { continue }
+    $Parts = $Entry -split '=', 2
+    if ($Parts.Count -ne 2 -or -not $Parts[0]) {
+        throw "-EnforcedTagValues entry '$Entry' must be in Tag=Value form."
+    }
+    if ($RequiredTags -notcontains $Parts[0]) {
+        throw "-EnforcedTagValues tag '$($Parts[0])' must also be listed in -RequiredTags."
+    }
+    $EnforcedMap[$Parts[0]] = $Parts[1]
 }
 
 $stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -171,12 +186,7 @@ $ResourceTypes = @(
 
 $TagMap = @{}
 $RequiredTags | ForEach-Object { $TagMap[$_] = "Required" }
-if ($EnforcedTagValues) {
-    foreach ($Entry in $EnforcedTagValues) {
-        $Parts = $Entry -split '='
-        if ($Parts.Count -eq 2) { $TagMap[$Parts[0]] = $Parts[1] }
-    }
-}
+foreach ($Key in $EnforcedMap.Keys) { $TagMap[$Key] = $EnforcedMap[$Key] }
 
 foreach ($SubId in $SubscriptionIds) {
     try {
