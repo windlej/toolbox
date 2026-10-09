@@ -9,8 +9,9 @@ For each computer, optionally lists Windows Server Backup sets (-CheckWbadmin) a
 backup folders (-BackupPaths, local or via the administrative share) to find the newest file. Each result is
 marked OK, Stale (older than -AlertIfOlderThanHours), Failed, Empty Backup Path or Unreachable. Output is an
 HTML report with a summary header, an optional CSV and a log file. If -AlertEmailTo is given and any backup
-is Failed or Stale, an email summary is sent through -SmtpServer (this is the only action outside the report
-folder; nothing else is changed).
+is Failed or Stale, an email summary is sent from -From through -SmtpServer (this is the only action outside
+the report folder; nothing else is changed; the script stops at start-up if -AlertEmailTo is given without -From).
+-CheckWbadmin runs Get-WBBackupSet locally for the local computer and through Invoke-Command (WinRM) for remote ones.
 
 .PARAMETER ComputerName
 One or more computers to check. Default: the local machine. Old name: ComputerNames.
@@ -28,7 +29,10 @@ Also write a CSV of the results next to the HTML report.
 Backups older than this many hours are marked Stale. Default: 48.
 
 .PARAMETER AlertEmailTo
-Optional recipients for an alert email when backups are Failed or Stale. No email is sent when omitted.
+Optional recipients for an alert email when backups are Failed or Stale. No email is sent when omitted. Requires -From.
+
+.PARAMETER From
+Sender address for the alert email (for example alerts@contoso.com). Required with -AlertEmailTo.
 
 .PARAMETER SmtpServer
 SMTP server used for the alert email. Default: localhost.
@@ -38,16 +42,17 @@ Folders (for example D:\Backups) whose newest file is checked. Remote computers 
 administrative share (\\computer\D$\...).
 
 .PARAMETER CheckWbadmin
-Also query Windows Server Backup sets with Get-WBBackupSet.
+Also query Windows Server Backup sets with Get-WBBackupSet (through Invoke-Command for remote computers, so
+WinRM must be enabled on them).
 
 .EXAMPLE
 .\Test-BackupStatus.ps1 -BackupPaths D:\Backups -OutputPath D:\Reports
 
 .EXAMPLE
-.\Test-BackupStatus.ps1 -ComputerName SRV01,SRV02 -CheckWbadmin -AlertIfOlderThanHours 30 -AlertEmailTo it@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+.\Test-BackupStatus.ps1 -ComputerName SRV01,SRV02 -CheckWbadmin -AlertIfOlderThanHours 30 -AlertEmailTo it@contoso.com -From alerts@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
 
 .NOTES
-Platform:     Windows (Windows Server Backup cmdlets for -CheckWbadmin; SMB access for remote backup paths)
+Platform:     Windows (Windows Server Backup cmdlets for -CheckWbadmin; WinRM for remote -CheckWbadmin; SMB access for remote backup paths)
 Permissions:  Local administrator on each target; read access to the backup folders or administrative shares
 When to use:  Daily or weekly backup verification, or to confirm a customer's backups are actually landing before a change window.
 Safety:       Read-only
@@ -75,6 +80,9 @@ param(
     [string[]]$AlertEmailTo,
 
     [Parameter(Mandatory = $false)]
+    [string]$From,
+
+    [Parameter(Mandatory = $false)]
     [string]$SmtpServer = "localhost",
 
     [Parameter(Mandatory = $false)]
@@ -86,6 +94,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($AlertEmailTo -and -not $From) {
+    throw '-AlertEmailTo requires -From.'
+}
 
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
@@ -114,7 +126,11 @@ function Test-WbadminBackup {
     param([string]$ComputerName)
 
     try {
-        $Backups = Get-WBBackupSet -ComputerName $ComputerName -ErrorAction Stop
+        if ($ComputerName -eq $env:COMPUTERNAME) {
+            $Backups = Get-WBBackupSet -ErrorAction Stop
+        } else {
+            $Backups = Invoke-Command -ComputerName $ComputerName -ScriptBlock { Get-WBBackupSet } -ErrorAction Stop
+        }
     } catch {
         Write-Log "Cannot query Windows Backup on $ComputerName : $($_.Exception.Message)" 'WARN'
         return @()
@@ -326,7 +342,7 @@ if ($AlertEmailTo -and ($FailedCount -gt 0 -or $StaleCount -gt 0)) {
             "[$($_.Status)] $($_.ComputerName) - $($_.Components) - Last: $($_.BackupTime)"
         }) -join "`n"
 
-        Send-MailMessage -To $AlertEmailTo -From "backup-monitor@$env:COMPUTERNAME" `
+        Send-MailMessage -To $AlertEmailTo -From $From `
             -Subject "[BACKUP ALERT] $FailedCount failed, $StaleCount stale" -Body $Body `
             -SmtpServer $SmtpServer -ErrorAction Stop
         Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
