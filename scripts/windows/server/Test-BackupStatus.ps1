@@ -8,9 +8,7 @@ Verifies that backups are recent: Windows Server Backup sets and/or the newest f
 For each computer, optionally lists Windows Server Backup sets (-CheckWbadmin) and optionally inspects
 backup folders (-BackupPaths, local or via the administrative share) to find the newest file. Each result is
 marked OK, Stale (older than -AlertIfOlderThanHours), Failed, Empty Backup Path or Unreachable. Output is an
-HTML report with a summary header, an optional CSV and a log file. If -AlertEmailTo is given and any backup
-is Failed or Stale, an email summary is sent from -From through -SmtpServer (this is the only action outside
-the report folder; nothing else is changed; the script stops at start-up if -AlertEmailTo is given without -From).
+HTML report with a summary header, an optional CSV and a log file. Nothing else is changed.
 -CheckWbadmin runs Get-WBBackupSet locally for the local computer and through Invoke-Command (WinRM) for remote ones.
 
 .PARAMETER ComputerName
@@ -28,15 +26,6 @@ Also write a CSV of the results next to the HTML report.
 .PARAMETER AlertIfOlderThanHours
 Backups older than this many hours are marked Stale. Default: 48.
 
-.PARAMETER AlertEmailTo
-Optional recipients for an alert email when backups are Failed or Stale. No email is sent when omitted. Requires -From.
-
-.PARAMETER From
-Sender address for the alert email (for example alerts@contoso.com). Required with -AlertEmailTo.
-
-.PARAMETER SmtpServer
-SMTP server used for the alert email. Default: localhost.
-
 .PARAMETER BackupPaths
 Folders (for example D:\Backups) whose newest file is checked. Remote computers are reached via the
 administrative share (\\computer\D$\...).
@@ -49,7 +38,7 @@ WinRM must be enabled on them).
 .\Test-BackupStatus.ps1 -BackupPaths D:\Backups -OutputPath D:\Reports
 
 .EXAMPLE
-.\Test-BackupStatus.ps1 -ComputerName SRV01,SRV02 -CheckWbadmin -AlertIfOlderThanHours 30 -AlertEmailTo it@contoso.com -From alerts@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+.\Test-BackupStatus.ps1 -ComputerName SRV01,SRV02 -CheckWbadmin -AlertIfOlderThanHours 30 -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
 
 .NOTES
 Platform:     Windows (Windows Server Backup cmdlets for -CheckWbadmin; WinRM for remote -CheckWbadmin; SMB access for remote backup paths)
@@ -77,15 +66,6 @@ param(
     [int]$AlertIfOlderThanHours = 48,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$AlertEmailTo,
-
-    [Parameter(Mandatory = $false)]
-    [string]$From,
-
-    [Parameter(Mandatory = $false)]
-    [string]$SmtpServer = "localhost",
-
-    [Parameter(Mandatory = $false)]
     [string[]]$BackupPaths,
 
     [Parameter(Mandatory = $false)]
@@ -94,10 +74,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-if ($AlertEmailTo -and -not $From) {
-    throw '-AlertEmailTo requires -From.'
-}
 
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
@@ -332,21 +308,4 @@ Write-Log "Report written: $htmlPath"
 if ($ExportCsv) {
     $AllResults | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
     Write-Log "CSV written: $csvPath"
-}
-
-if ($AlertEmailTo -and ($FailedCount -gt 0 -or $StaleCount -gt 0)) {
-    try {
-        $Body = "Backup Verification Alert - $(Get-Date -Format 'yyyy-MM-dd HH:mm')`n`n"
-        $Body += "Summary: $FailedCount failed, $StaleCount stale, $UnreachableCount unreachable`n`n"
-        $Body += ($AllResults | Where-Object { $_.Status -ne "OK" } | ForEach-Object {
-            "[$($_.Status)] $($_.ComputerName) - $($_.Components) - Last: $($_.BackupTime)"
-        }) -join "`n"
-
-        Send-MailMessage -To $AlertEmailTo -From $From `
-            -Subject "[BACKUP ALERT] $FailedCount failed, $StaleCount stale" -Body $Body `
-            -SmtpServer $SmtpServer -ErrorAction Stop
-        Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
-    } catch {
-        Write-Log "Failed to send alert: $($_.Exception.Message)" 'WARN'
-    }
 }
