@@ -7,11 +7,13 @@ Checks which Azure VMs are protected by Azure Backup (Recovery Services vaults).
 
 .DESCRIPTION
 For each accessible subscription (or the ones you list) the script lists all Recovery Services vaults and the
-Azure VM backup items in them, then compares VM names against every VM in the subscription. Each VM is marked
+Azure VM backup items in them, then compares each item's source VM resource ID against every VM in the subscription. Each VM is marked
 Protected or UNPROTECTED; vaults and their backup policy names are also recorded.
 
 Output is an HTML report (primary) listing the VMs with coverage percentage, plus an optional CSV of the VM
-rows. Matching is by VM name only. The script makes no changes to Azure.
+rows. Matching is by VM resource ID, so same-named VMs in different resource groups are told apart. Vaults are
+queried with -VaultId; the deprecated Set-AzRecoveryServicesVaultContext is not used. A vault whose backup items
+cannot be read is logged as a warning (VMs may then show as UNPROTECTED). The script makes no changes to Azure.
 
 .PARAMETER SubscriptionIds
 Optional list of subscription ids to check. Default: every subscription the signed-in account can see.
@@ -39,7 +41,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts, Az.Compute and Az.Recov
 Permissions:  Azure RBAC Reader on the subscriptions plus Backup Reader on the Recovery Services vaults
 When to use:  Disaster-recovery readiness review, or to prove backup coverage to an auditor or customer.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -122,14 +124,19 @@ foreach ($SubId in $SubscriptionIds) {
         Write-Log "Could not list VMs in ${SubName}: $_" 'WARN'
         continue
     }
-    $ProtectedVMs = @()
+    $ProtectedVMs = [System.Collections.Generic.HashSet[string]]::new()
 
     foreach ($Vault in $Vaults) {
         try {
-            Set-AzRecoveryServicesVaultContext -Vault $Vault -ErrorAction Stop
-            $ProtectedItems = Get-AzRecoveryServicesBackupItem -VaultId $Vault.ID -BackupManagementType AzureVM -WorkloadType AzureVM -ErrorAction SilentlyContinue
+            $ProtectedItems = Get-AzRecoveryServicesBackupItem -VaultId $Vault.ID -BackupManagementType AzureVM -WorkloadType AzureVM -ErrorAction Stop
             foreach ($Item in $ProtectedItems) {
-                $ProtectedVMs += $Item.VmName
+                # Match on the VM's ARM resource ID, not its name: names repeat across resource groups.
+                $ItemVmId = $null
+                foreach ($PropName in 'VirtualMachineId', 'SourceResourceId') {
+                    $Prop = $Item.PSObject.Properties[$PropName]
+                    if ($Prop -and $Prop.Value) { $ItemVmId = [string]$Prop.Value; break }
+                }
+                if ($ItemVmId) { [void]$ProtectedVMs.Add($ItemVmId.ToLowerInvariant()) }
             }
         } catch {
             Write-Log "Could not read backup items from vault $($Vault.Name): $_" 'WARN'
@@ -137,7 +144,7 @@ foreach ($SubId in $SubscriptionIds) {
     }
 
     foreach ($VM in $VMs) {
-        $IsProtected = $ProtectedVMs -contains $VM.Name
+        $IsProtected = $ProtectedVMs.Contains(([string]$VM.Id).ToLowerInvariant())
         $Status = if ($IsProtected) { "Protected" } else { "UNPROTECTED" }
 
         $Results.Add([PSCustomObject]@{
@@ -153,7 +160,6 @@ foreach ($SubId in $SubscriptionIds) {
 
     foreach ($Vault in $Vaults) {
         try {
-            Set-AzRecoveryServicesVaultContext -Vault $Vault -ErrorAction Stop
             $Policy = Get-AzRecoveryServicesBackupProtectionPolicy -VaultId $Vault.ID -ErrorAction SilentlyContinue
             $PolicyName = if ($Policy) { $Policy.Name } else { "No Policy" }
             $Results.Add([PSCustomObject]@{
