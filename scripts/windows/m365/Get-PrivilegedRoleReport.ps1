@@ -24,9 +24,6 @@ Also write the assignments to a CSV next to the HTML report.
 .PARAMETER IncludePimEligible
 Also query PIM eligible role assignments (requires Entra ID P2 licensing).
 
-.PARAMETER IncludePermanent
-Reserved. Permanent assignments are always included; this switch currently has no effect.
-
 .PARAMETER SkipGraphConnect
 Skip Connect-MgGraph (use when a Graph session with suitable scopes already exists).
 
@@ -41,7 +38,7 @@ Platform:     Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK)
 Permissions:  Graph scopes RoleManagement.Read.Directory, Directory.Read.All, User.Read.All, AuditLog.Read.All (Global Reader or Security Reader); PIM eligibility needs Entra ID P2
 When to use:  Access reviews, security assessments, or before cutting down the number of Global Administrators.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -52,8 +49,6 @@ param(
     [switch]$ExportCsv,
 
     [switch]$IncludePimEligible,
-
-    [switch]$IncludePermanent,
 
     [switch]$SkipGraphConnect
 )
@@ -196,7 +191,6 @@ function Get-DirectoryRoleMembers {
 function Get-UnifiedRoleAssignments {
     param(
         [hashtable]$RoleDefinitionMap,
-        [bool]$IncludePermanent,
         [bool]$IncludeEligible
     )
 
@@ -285,13 +279,18 @@ try {
 
     Write-Log 'Retrieving unified role assignments...'
     $UnifiedResults = @(Get-UnifiedRoleAssignments -RoleDefinitionMap $RoleDefinitionMap `
-        -IncludePermanent ([bool]$IncludePermanent) -IncludeEligible ([bool]$IncludePimEligible))
+        -IncludeEligible ([bool]$IncludePimEligible))
     Write-Log "Found $($UnifiedResults.Count) unified role assignments"
 
     $Results = @($DirRoleResults + $UnifiedResults)
     $Results = @($Results | Where-Object {
         $PrivilegedRoleNames -contains $_.RoleDisplayName
-    } | Sort-Object RoleDisplayName, UserPrincipalName | Select-Object -Unique)
+    })
+
+    # The directory-role and unified-role sources overlap, so keep one row per role, user and assignment kind.
+    $Results = @($Results | Group-Object -Property {
+        '{0}|{1}|{2}' -f $_.RoleDisplayName, $_.UserId, ($_.AssignmentType -replace '\s*\(.*$', '')
+    } | ForEach-Object { $_.Group[0] } | Sort-Object RoleDisplayName, UserPrincipalName)
 
     $GlobalAdminCount = @($Results | Where-Object { $_.RoleDisplayName -eq 'Global Administrator' }).Count
     $PermanentCount   = @($Results | Where-Object { $_.AssignmentType -match 'Permanent' }).Count
