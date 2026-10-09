@@ -3,7 +3,7 @@
 .SYNOPSIS
   Toolbox — interactive TUI launcher for infrastructure automation scripts.
 .DESCRIPTION
-  Discovers scripts under scripts/powershell/, parses parameters via AST,
+  Discovers scripts under scripts/windows/, parses parameters via AST,
   provides interactive parameter input, module dependency checking, and
   multiple execution modes (run, print, clipboard, new process, remote).
 .NOTES
@@ -20,8 +20,8 @@ param(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 $ScriptRoot = Split-Path -Parent $PSCommandPath
-$ScriptsRoot = Join-Path $ScriptRoot "scripts" "powershell"
-$ManifestPath = Join-Path $ScriptRoot "scripts" "toolbox-manifest.json"
+$ScriptsRoot = Join-Path (Join-Path $ScriptRoot "scripts") "windows"
+$ManifestPath = Join-Path (Join-Path $ScriptRoot "scripts") "toolbox-manifest.json"
 $HostProgram = if ($PSVersionTable.PSVersion.Major -ge 7) { "pwsh" } else { "powershell.exe" }
 
 $CategoryNames = @{
@@ -149,7 +149,7 @@ function ConvertTo-Hashtable {
 function Get-ScriptCatalog {
     <#
     .SYNOPSIS
-      Walks scripts/powershell/ subdirectories, parses each .ps1 via the AST,
+      Walks scripts/windows/ subdirectories, parses each .ps1 via the AST,
       extracts parameters, dependencies, and description. Merges with optional
       manifest.json for enriched descriptions and examples.
     #>
@@ -385,7 +385,7 @@ function Get-ScriptDescription {
 function Update-ToolboxManifest {
     <#
     .SYNOPSIS
-      Scans scripts/powershell/ for .ps1 files not yet in toolbox-manifest.json
+      Scans scripts/windows/ for .ps1 files not yet in toolbox-manifest.json
       and scaffolds entries using AST-extracted descriptions. Safe to run
       repeatedly — existing entries are never overwritten.
     #>
