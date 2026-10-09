@@ -11,6 +11,12 @@ an HTML report listing each stale computer with its OS, enabled state, last logo
 creation date and the action taken. By default nothing is changed (report only). -DisableComputers disables
 enabled stale accounts; -DeleteComputers deletes stale accounts that are already disabled. Both honor -WhatIf and
 -Confirm, so a dry run shows the planned action ("Disable"/"Delete") in the report without touching AD.
+Accounts that have never logged on have no LastLogonDate and are skipped by default. -IncludeNeverLoggedOn also
+reports them, using the creation date (whenCreated) as the age basis; the AgeBasis column shows which date was used.
+A computer account that contains child objects (for example BitLocker recovery or Hyper-V objects) cannot be deleted
+with Remove-ADComputer. By default such accounts are skipped, reported as "DeleteSkippedHasChildren" and logged.
+-DeleteChildObjects deletes the account together with its child objects (Remove-ADObject -Recursive); the child
+count is shown in the report and in the -WhatIf message.
 Recommended order: run report-only, run with -DisableComputers, wait a retention period, then run with -DeleteComputers.
 
 .PARAMETER OutputPath
@@ -31,6 +37,12 @@ Disable stale computer accounts that are currently enabled. Supports -WhatIf.
 .PARAMETER DeleteComputers
 Delete stale computer accounts that are already disabled. Supports -WhatIf. Deletion is permanent unless the AD Recycle Bin is enabled.
 
+.PARAMETER IncludeNeverLoggedOn
+Also treat computer accounts with no LastLogonDate as candidates, using the creation date as the age basis (created at least -InactiveDays ago). Off by default. Combine with -DisableComputers / -DeleteComputers to act on them.
+
+.PARAMETER DeleteChildObjects
+With -DeleteComputers, delete computer accounts that contain child objects, removing the children too (Remove-ADObject -Recursive). Off by default; without it such accounts are skipped and reported. Supports -WhatIf.
+
 .EXAMPLE
 .\Remove-StaleADComputer.ps1 -InactiveDays 120 -OutputPath D:\Reports
 
@@ -42,7 +54,7 @@ Platform:     Windows (RSAT ActiveDirectory module, domain-joined machine)
 Permissions:  Read-only domain user for the report; rights to disable/delete computer objects (e.g. Domain Admin or delegated Account Operator) for -DisableComputers / -DeleteComputers
 When to use:  Periodic AD hygiene, after decommissioning projects, or before a domain audit to clear out dead computer objects.
 Safety:       Destructive (supports -WhatIf)
-Version:      1.0
+Version:      1.1
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -51,7 +63,9 @@ param(
     [int]$InactiveDays = 90,
     [string]$OuPath,
     [switch]$DisableComputers,
-    [switch]$DeleteComputers
+    [switch]$DeleteComputers,
+    [switch]$IncludeNeverLoggedOn,
+    [switch]$DeleteChildObjects
 )
 
 Set-StrictMode -Version Latest
@@ -87,31 +101,77 @@ Import-Module ActiveDirectory -ErrorAction Stop
 
 $CutoffDate = (Get-Date).AddDays(-$InactiveDays)
 
+if ($DeleteChildObjects -and -not $DeleteComputers) {
+    Write-Log '-DeleteChildObjects has no effect without -DeleteComputers.' 'WARN'
+}
+
+# With -IncludeNeverLoggedOn the server-side filter is widened to old Created dates; the exact age test is applied below.
+if ($IncludeNeverLoggedOn) {
+    $ComputerFilter = { OperatingSystem -like "*Windows*" -and (LastLogonDate -lt $CutoffDate -or Created -lt $CutoffDate) }
+} else {
+    $ComputerFilter = { LastLogonDate -lt $CutoffDate -and OperatingSystem -like "*Windows*" }
+}
+
 $queryParams = @{
     Properties = @('Name', 'OperatingSystem', 'LastLogonDate', 'PasswordLastSet',
                     'Enabled', 'Created', 'Description', 'IPv4Address')
-    Filter     = { LastLogonDate -lt $CutoffDate -and OperatingSystem -like "*Windows*" }
+    Filter     = $ComputerFilter
 }
 
 if ($OuPath) {
     $queryParams.SearchBase = $OuPath
 }
 
-$StaleComputers = @(Get-ADComputer @queryParams | Sort-Object LastLogonDate)
+$StaleComputers = @(Get-ADComputer @queryParams | Where-Object {
+    if ($_.LastLogonDate) { $_.LastLogonDate -lt $CutoffDate }
+    else { $IncludeNeverLoggedOn -and $_.Created -lt $CutoffDate }
+} | Sort-Object LastLogonDate, Created)
 Write-Log "Found $($StaleComputers.Count) computer(s) inactive since $CutoffDate."
 
 $Results = @(foreach ($Computer in $StaleComputers) {
     $Action = "None"
+    $ChildCount = $null
+
+    if ($Computer.LastLogonDate) {
+        $AgeBasis = 'LastLogon'
+        $BasisDate = $Computer.LastLogonDate
+    } else {
+        $AgeBasis = 'WhenCreated'
+        $BasisDate = $Computer.Created
+    }
 
     if ($DeleteComputers -and $Computer.Enabled -eq $false) {
         $Action = "Delete"
-        if ($PSCmdlet.ShouldProcess($Computer.DistinguishedName, 'Delete computer account')) {
-            try {
-                Remove-ADComputer -Identity $Computer.DistinguishedName -Confirm:$false
-                $Action = "Deleted"
-            } catch {
-                $Action = "DeleteFailed"
-                Write-Log "Delete failed for $($Computer.Name): $($_.Exception.Message)" 'ERROR'
+        try {
+            $ChildCount = @(Get-ADObject -SearchBase $Computer.DistinguishedName -SearchScope OneLevel -Filter *).Count
+        } catch {
+            $Action = "DeleteFailed"
+            Write-Log "Child object check failed for $($Computer.Name): $($_.Exception.Message)" 'ERROR'
+        }
+
+        if ($Action -eq "Delete" -and $ChildCount -gt 0 -and -not $DeleteChildObjects) {
+            $Action = "DeleteSkippedHasChildren"
+            Write-Log "Skipping delete of $($Computer.Name): $ChildCount child object(s). Use -DeleteChildObjects to delete them too." 'WARN'
+        } elseif ($Action -eq "Delete") {
+            $Recursive = $ChildCount -gt 0
+            if ($Recursive) {
+                $Action = "Delete (with $ChildCount child object(s))"
+                $Target = "$($Computer.DistinguishedName) and $ChildCount child object(s)"
+            } else {
+                $Target = $Computer.DistinguishedName
+            }
+            if ($PSCmdlet.ShouldProcess($Target, 'Delete computer account')) {
+                try {
+                    if ($Recursive) {
+                        Remove-ADObject -Identity $Computer.DistinguishedName -Recursive -Confirm:$false
+                    } else {
+                        Remove-ADComputer -Identity $Computer.DistinguishedName -Confirm:$false
+                    }
+                    $Action = "Deleted"
+                } catch {
+                    $Action = "DeleteFailed"
+                    Write-Log "Delete failed for $($Computer.Name): $($_.Exception.Message)" 'ERROR'
+                }
             }
         }
     } elseif ($DisableComputers -and $Computer.Enabled) {
@@ -134,7 +194,9 @@ $Results = @(foreach ($Computer in $StaleComputers) {
         LastLogonDate      = $Computer.LastLogonDate
         PasswordLastSet    = $Computer.PasswordLastSet
         Created            = $Computer.Created
-        DaysSinceLogon     = [math]::Round(((Get-Date) - $Computer.LastLogonDate).TotalDays)
+        AgeBasis           = $AgeBasis
+        DaysSinceLogon     = [math]::Round(((Get-Date) - $BasisDate).TotalDays)
+        ChildObjects       = $ChildCount
         DistinguishedName  = $Computer.DistinguishedName
         Action             = $Action
     }
@@ -143,11 +205,13 @@ $Results = @(foreach ($Computer in $StaleComputers) {
 $TotalStale = @($Results | Where-Object { $_.DaysSinceLogon -ge $InactiveDays }).Count
 $TotalDisabled = @($Results | Where-Object { $_.Action -eq "Disabled" }).Count
 $TotalDeleted = @($Results | Where-Object { $_.Action -eq "Deleted" }).Count
+$TotalSkipped = @($Results | Where-Object { $_.Action -eq "DeleteSkippedHasChildren" }).Count
 
 $HtmlBody = $Results | Where-Object { $_.DaysSinceLogon -ge $InactiveDays } | ForEach-Object {
     $RowColor = switch ($_.Action) {
         "Deleted" { "background-color: #ffcccc;" }
         "Disabled" { "background-color: #fff3cd;" }
+        "DeleteSkippedHasChildren" { "background-color: #e2e3e5;" }
         default { "" }
     }
     "<tr style='$RowColor'>
@@ -155,9 +219,11 @@ $HtmlBody = $Results | Where-Object { $_.DaysSinceLogon -ge $InactiveDays } | Fo
         <td>$($_.OperatingSystem)</td>
         <td>$($_.Enabled)</td>
         <td>$($_.LastLogonDate)</td>
+        <td>$($_.AgeBasis)</td>
         <td>$($_.DaysSinceLogon)</td>
         <td>$($_.PasswordLastSet)</td>
         <td>$($_.Created)</td>
+        <td>$($_.ChildObjects)</td>
         <td>$($_.Action)</td>
     </tr>"
 }
@@ -183,15 +249,18 @@ tr:hover { background: #f5f5f5; }
     <strong>Parameters:</strong> Inactive Days: $InactiveDays |
     Disable: $($DisableComputers.IsPresent) |
     Delete: $($DeleteComputers.IsPresent) |
+    Include Never Logged On: $($IncludeNeverLoggedOn.IsPresent) |
+    Delete Child Objects: $($DeleteChildObjects.IsPresent) |
     WhatIf: $WhatIfPreference<br>
     <strong>Total Stale Computers:</strong> $TotalStale<br>
     <strong>Disabled:</strong> $TotalDisabled |
-    <strong>Deleted:</strong> $TotalDeleted
+    <strong>Deleted:</strong> $TotalDeleted |
+    <strong>Skipped (has child objects):</strong> $TotalSkipped
 </div>
 <table>
 <tr>
-    <th>Name</th><th>OS</th><th>Enabled</th><th>Last Logon</th>
-    <th>Days Inactive</th><th>Pwd Last Set</th><th>Created</th><th>Action</th>
+    <th>Name</th><th>OS</th><th>Enabled</th><th>Last Logon</th><th>Age Basis</th>
+    <th>Days Inactive</th><th>Pwd Last Set</th><th>Created</th><th>Child Objects</th><th>Action</th>
 </tr>
 $($HtmlBody -join "`n")
 </table>
@@ -201,4 +270,4 @@ $($HtmlBody -join "`n")
 $Html | Out-File -LiteralPath $htmlPath -Encoding UTF8 -WhatIf:$false
 
 Write-Log "Report generated: $htmlPath"
-Write-Log "Summary: $TotalStale stale computers | Disabled: $TotalDisabled | Deleted: $TotalDeleted"
+Write-Log "Summary: $TotalStale stale computers | Disabled: $TotalDisabled | Deleted: $TotalDeleted | Skipped (children): $TotalSkipped"
