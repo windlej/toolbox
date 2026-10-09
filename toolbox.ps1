@@ -104,7 +104,12 @@ function Write-Err {
 }
 
 function Get-ConsoleWidth {
-    try { return [Math]::Min(([Console]::WindowWidth - 1), 120) } catch { return 80 }
+    # Redirected or detached hosts report a width of 0; fall back to 80 and never go below 40.
+    try {
+        $W = [Console]::WindowWidth
+        if ($W -lt 41) { return 80 }
+        return [Math]::Min(($W - 1), 120)
+    } catch { return 80 }
 }
 
 function Write-Rule {
