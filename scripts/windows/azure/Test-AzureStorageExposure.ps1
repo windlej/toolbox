@@ -40,7 +40,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Storage modules)
 Permissions:  Azure RBAC Reader on each subscription (Microsoft.Storage/storageAccounts/read); no data-plane access needed
 When to use:  Security assessment, after a data-exposure scare, or before a compliance audit to find storage accounts open to the Internet.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -110,7 +110,8 @@ function Test-StorageExposure {
 
     if (-not $StorageAccount.EnableHttpsTrafficOnly) {
         $Flags += "HTTPSNotRequired"
-        $Risk = "Medium"
+        # Only raise the rating, never lower an account already rated High.
+        if ($Risk -ne "High") { $Risk = "Medium" }
     }
 
     if ($StorageAccount.MinimumTlsVersion -ne "TLS1_2" -and $StorageAccount.MinimumTlsVersion -ne "TLS1_3") {
