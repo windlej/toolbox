@@ -1,50 +1,123 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Reports, enables or disables Litigation Hold on Exchange Online mailboxes.
+
+.DESCRIPTION
+For each mailbox given by -UserPrincipalNames or a CSV with a UserPrincipalName column (-CsvPath), reads the current
+Litigation Hold state, duration, note and retention-hold flag. With -EnableHold it turns Litigation Hold on (using
+-HoldDurationDays and -HoldNote) for mailboxes where it is off. With -DisableHold it turns Litigation Hold off for
+mailboxes where it is on. With neither switch, or with -ReportOnly, it only reports.
+
+Disabling a hold can allow preserved data to be purged under the retention policy, so confirm with legal/compliance
+first. Use -WhatIf to preview every change. If both -EnableHold and -DisableHold are given, enabling takes priority.
+
+Output is an HTML report (primary) with one row per mailbox and the action taken, an optional CSV (-ExportCsv) and
+a log file, all in the output folder.
+
+.PARAMETER UserPrincipalNames
+Mailboxes (UPNs) to process. Required unless -CsvPath is used.
+
+.PARAMETER CsvPath
+Input CSV with a UserPrincipalName column listing the mailboxes to process (used instead of -UserPrincipalNames).
+
+.PARAMETER OutputPath
+Folder for the report, CSV and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the per-mailbox results to a CSV next to the HTML report.
+
+.PARAMETER HoldDurationDays
+Hold duration in days applied when enabling a hold. Default 365.
+
+.PARAMETER EnableHold
+Turn Litigation Hold on for mailboxes where it is currently off.
+
+.PARAMETER DisableHold
+Turn Litigation Hold off for mailboxes where it is currently on.
+
+.PARAMETER ReportOnly
+Report current hold state only, even if -EnableHold or -DisableHold is given.
+
+.PARAMETER HoldNote
+Note stored on the mailbox when enabling a hold.
+
+.PARAMETER SkipExchangeConnect
+Do not call Connect-ExchangeOnline; use an existing session.
+
+.EXAMPLE
+.\Set-MailboxLitigationHold.ps1 -UserPrincipalNames user@contoso.com -ReportOnly -OutputPath D:\Reports
+
+.EXAMPLE
+.\Set-MailboxLitigationHold.ps1 -CsvPath D:\Input\custodians.csv -EnableHold -HoldDurationDays 730 -HoldNote "Matter 2026-014" -WhatIf -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
+Permissions:  Exchange Online roles Mailbox Search or Legal Hold (to set holds) and View-Only Recipients (to report)
+When to use:  Placing custodian mailboxes on hold for legal or compliance requests, or auditing which mailboxes are on hold before offboarding.
+Safety:       Destructive (supports -WhatIf)
+Version:      1.1
+#>
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByUpn')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ByUpn')]
     [string[]]$UserPrincipalNames,
 
-    [Parameter(Mandatory = $false)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'ByCsv')]
     [string]$CsvPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\LitigationHold_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
-
-    [Parameter(Mandatory = $false)]
-    [string]$CsvExportPath,
-
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
+    [switch]$ExportCsv,
     [int]$HoldDurationDays = 365,
-
-    [Parameter(Mandatory = $false)]
     [switch]$EnableHold,
-
-    [Parameter(Mandatory = $false)]
     [switch]$DisableHold,
-
-    [Parameter(Mandatory = $false)]
     [switch]$ReportOnly,
-
-    [Parameter(Mandatory = $false)]
     [string]$HoldNote = "Litigation hold enabled for legal compliance.",
-
-    [Parameter(Mandatory = $false)]
-    [switch]$WhatIf,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipExchangeConnect
 )
+
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force -WhatIf:$false | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line -WhatIf:$false }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Set-MailboxLitigationHold_$stamp.html"
+$csvOut   = Join-Path $outDir "Set-MailboxLitigationHold_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Set-MailboxLitigationHold_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToExchange {
+    if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
+        throw 'ExchangeOnlineManagement module not found. Install: Install-Module ExchangeOnlineManagement -Scope CurrentUser'
+    }
     try {
-        $Module = Get-Module ExchangeOnlineManagement -ListAvailable -ErrorAction SilentlyContinue
-        if (-not $Module) { return $false }
         Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-        Write-Host "Connected to Exchange Online" -ForegroundColor Green
-        return $true
+        Write-Log 'Connected to Exchange Online'
     } catch {
-        Write-Error "Exchange connection failed: $_"
-        return $false
+        Write-Log "Exchange connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -57,6 +130,7 @@ function Get-MailboxHoldStatus {
             return [PSCustomObject]@{
                 UserPrincipalName = $Identity
                 DisplayName       = "Not Found"
+                RecipientType     = $null
                 LitigationHoldEnabled = $null
                 HoldDuration      = $null
                 HoldNote          = ""
@@ -86,6 +160,7 @@ function Get-MailboxHoldStatus {
         return [PSCustomObject]@{
             UserPrincipalName = $Identity
             DisplayName       = "Error"
+            RecipientType     = $null
             LitigationHoldEnabled = $null
             HoldDuration      = $null
             HoldNote          = ""
@@ -102,10 +177,9 @@ function Set-LitigationHold {
         [string]$Note
     )
 
-    $Action = if ($Enable) { "EnableHold" } else { "DisableHold" }
+    $Action = if ($Enable) { "Enable Litigation Hold" } else { "Disable Litigation Hold" }
 
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Would $Action for $Identity" -ForegroundColor Yellow
+    if (-not $PSCmdlet.ShouldProcess($Identity, $Action)) {
         return "WhatIf"
     }
 
@@ -125,83 +199,86 @@ function Set-LitigationHold {
         }
 
         Set-Mailbox @Params
-        return if ($Enable) { "Enabled" } else { "Disabled" }
+        if ($Enable) { return "Enabled" } else { return "Disabled" }
     } catch {
-        Write-Warning "Failed to set hold on $Identity : $_"
+        Write-Log "Failed to set hold on $Identity : $_" 'WARN'
         return "Failed"
     }
 }
 
 # ── MAIN ──
-Write-Host "=== Litigation Hold Enablement ===" -ForegroundColor Cyan
-$(if ($EnableHold) { Write-Host "Action: ENABLE hold ($HoldDurationDays days)" -ForegroundColor Yellow })
-$(if ($DisableHold) { Write-Host "Action: DISABLE hold" -ForegroundColor Yellow })
-$(if ($ReportOnly) { Write-Host "Action: REPORT only (no changes)" -ForegroundColor Cyan })
+try {
+    Write-Log 'Litigation hold run started.'
+    if ($ReportOnly) { Write-Log 'Action: REPORT only (no changes)' }
+    elseif ($EnableHold) { Write-Log "Action: ENABLE hold ($HoldDurationDays days)" }
+    elseif ($DisableHold) { Write-Log 'Action: DISABLE hold' 'WARN' }
+    else { Write-Log 'Action: REPORT only (neither -EnableHold nor -DisableHold given)' }
 
-if (-not $SkipExchangeConnect) {
-    Connect-ToExchange
-}
+    if (-not $SkipExchangeConnect) {
+        Connect-ToExchange
+    }
 
-if ($CsvPath) {
-    $CsvData = Import-Csv $CsvPath
-    $UserPrincipalNames = $CsvData.UserPrincipalName
-}
+    if ($CsvPath) {
+        $CsvData = Import-Csv -LiteralPath $CsvPath
+        $UserPrincipalNames = $CsvData.UserPrincipalName
+    }
 
-Write-Host "Processing $($UserPrincipalNames.Count) mailboxes..." -ForegroundColor Yellow
+    $UserPrincipalNames = @($UserPrincipalNames)
+    Write-Log "Processing $($UserPrincipalNames.Count) mailboxes..."
 
-foreach ($UPN in $UserPrincipalNames) {
-    Write-Host "  $UPN" -ForegroundColor Gray
+    foreach ($UPN in $UserPrincipalNames) {
+        Write-Log "  $UPN"
 
-    $Current = Get-MailboxHoldStatus -Identity $UPN
+        $Current = Get-MailboxHoldStatus -Identity $UPN
 
-    $Action = ""
-    if (-not $ReportOnly) {
-        if ($EnableHold -and -not $Current.LitigationHoldEnabled) {
-            $Result = Set-LitigationHold -Identity $UPN -Enable $true -DurationDays $HoldDurationDays -Note $HoldNote
-            $Action = $Result
-        } elseif ($DisableHold -and $Current.LitigationHoldEnabled) {
-            $Result = Set-LitigationHold -Identity $UPN -Enable $false -DurationDays $HoldDurationDays -Note $HoldNote
-            $Action = $Result
+        $Action = ""
+        if (-not $ReportOnly) {
+            if ($EnableHold -and -not $Current.LitigationHoldEnabled) {
+                $Result = Set-LitigationHold -Identity $UPN -Enable $true -DurationDays $HoldDurationDays -Note $HoldNote
+                $Action = $Result
+            } elseif ($DisableHold -and $Current.LitigationHoldEnabled) {
+                $Result = Set-LitigationHold -Identity $UPN -Enable $false -DurationDays $HoldDurationDays -Note $HoldNote
+                $Action = $Result
+            }
         }
+
+        $Results.Add([PSCustomObject]@{
+            UserPrincipalName     = $UPN
+            DisplayName           = $Current.DisplayName
+            RecipientType         = $Current.RecipientType
+            CurrentHoldEnabled    = $Current.LitigationHoldEnabled
+            CurrentDuration       = $Current.HoldDuration
+            CurrentNote           = $Current.HoldNote
+            Action                = if ($Action) { $Action } else { "NoChange" }
+        })
     }
 
-    $Results.Add([PSCustomObject]@{
-        UserPrincipalName     = $UPN
-        DisplayName           = $Current.DisplayName
-        RecipientType         = $Current.RecipientType
-        CurrentHoldEnabled    = $Current.LitigationHoldEnabled
-        CurrentDuration       = $Current.HoldDuration
-        CurrentNote           = $Current.HoldNote
-        Action                = if ($Action) { $Action } else { "NoChange" }
-    })
-}
+    $EnabledCount = @($Results | Where-Object { $_.Action -eq "Enabled" }).Count
+    $DisabledCount = @($Results | Where-Object { $_.Action -eq "Disabled" }).Count
+    $AlreadyOn = @($Results | Where-Object { $_.Action -eq "NoChange" -and $_.CurrentHoldEnabled }).Count
+    $AlreadyOff = @($Results | Where-Object { $_.Action -eq "NoChange" -and -not $_.CurrentHoldEnabled }).Count
+    $FailedCount = @($Results | Where-Object { $_.Action -eq "Failed" }).Count
 
-$EnabledCount = ($Results | Where-Object { $_.Action -eq "Enabled" }).Count
-$DisabledCount = ($Results | Where-Object { $_.Action -eq "Disabled" }).Count
-$AlreadyOn = ($Results | Where-Object { $_.Action -eq "NoChange" -and $_.CurrentHoldEnabled }).Count
-$AlreadyOff = ($Results | Where-Object { $_.Action -eq "NoChange" -and -not $_.CurrentHoldEnabled }).Count
-$FailedCount = ($Results | Where-Object { $_.Action -eq "Failed" }).Count
+    Write-Log 'Summary'
+    Write-Log "Enabled: $EnabledCount | Disabled: $DisabledCount | Already On: $AlreadyOn | Already Off: $AlreadyOff | Failed: $FailedCount"
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Enabled: $EnabledCount | Disabled: $DisabledCount | Already On: $AlreadyOn | Already Off: $AlreadyOff | Failed: $FailedCount"
-
-$HtmlRows = $Results | ForEach-Object {
-    $RowClass = switch ($_.Action) {
-        "Enabled" { "success" }
-        "Disabled" { "warning" }
-        "Failed" { "danger" }
-        default { "" }
-    }
-    "<tr class='$RowClass'>
+    $HtmlRows = $Results | ForEach-Object {
+        $RowClass = switch ($_.Action) {
+            "Enabled" { "success" }
+            "Disabled" { "warning" }
+            "Failed" { "danger" }
+            default { "" }
+        }
+        "<tr class='$RowClass'>
         <td>$($_.UserPrincipalName)</td>
         <td>$($_.DisplayName)</td>
         <td>$($_.CurrentHoldEnabled)</td>
         <td>$($_.CurrentDuration)</td>
         <td>$($_.Action)</td>
     </tr>"
-}
+    }
 
-$Html = @"
+    $Html = @"
 <!DOCTYPE html>
 <html>
 <head><title>Litigation Hold Report</title>
@@ -233,10 +310,15 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+    $Html | Out-File -LiteralPath $htmlPath -Encoding UTF8 -WhatIf:$false
+    Write-Log "Report written: $htmlPath"
 
-if ($CsvExportPath) {
-    $Results | Export-Csv -Path $CsvExportPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvExportPath" -ForegroundColor Green
+    if ($ExportCsv) {
+        $Results | Export-Csv -LiteralPath $csvOut -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+        Write-Log "CSV written: $csvOut"
+    }
+}
+catch {
+    Write-Log "Litigation hold run failed: $_" 'ERROR'
+    throw
 }

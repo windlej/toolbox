@@ -1,49 +1,118 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Finds inbox rules that look like mail exfiltration or hiding activity (forward/redirect, delete, keywords, bad domains).
+
+.DESCRIPTION
+Reads the inbox rules of all Exchange Online mailboxes, a list of UPNs, or a CSV with a UserPrincipalName column,
+and flags rules that forward or redirect mail, delete messages without moving them, stop rule processing, contain
+any of the -SuspiciousKeywords in their name/description/actions, or forward to any of the -SuspiciousDomains.
+By default only flagged rules are reported; use -ReportAllRules to list every rule.
+
+Output is an HTML report (primary, suspicious rows highlighted), an optional CSV with the full rule detail
+(-ExportCsv) and a log file, all in the output folder. The script does not change anything. Note that the rule
+detail (forward targets, subject/body match text) may be sensitive; store the output accordingly.
+
+.PARAMETER UserPrincipalNames
+Optional list of mailboxes (UPNs) to check. If neither this nor -CsvPath is given, all mailboxes are checked.
+
+.PARAMETER CsvPath
+Optional input CSV with a UserPrincipalName column listing the mailboxes to check.
+
+.PARAMETER OutputPath
+Folder for the report, CSV and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the rule rows to a CSV next to the HTML report.
+
+.PARAMETER SuspiciousKeywords
+Keywords that flag a rule when found in its name, description or action text. A built-in list is used by default.
+
+.PARAMETER SuspiciousDomains
+Optional list of domains; rules forwarding or redirecting to any of them are flagged.
+
+.PARAMETER MaxRuleReportLength
+Reserved. Accepted for compatibility but not used by the current report.
+
+.PARAMETER ReportAllRules
+Report every inbox rule found, not just the suspicious ones.
+
+.PARAMETER SkipExchangeConnect
+Do not call Connect-ExchangeOnline; use an existing session.
+
+.EXAMPLE
+.\Get-SuspiciousInboxRule.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-SuspiciousInboxRule.ps1 -UserPrincipalNames user@contoso.com -SuspiciousDomains fabrikam.net -ReportAllRules -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
+Permissions:  Exchange Online roles View-Only Recipients and Mail Recipients (Get-InboxRule reads other users' rules)
+When to use:  After a phishing or business-email-compromise incident, or as a periodic sweep for attacker-created inbox rules.
+Safety:       Read-only
+Version:      1.1
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$UserPrincipalNames,
-
-    [Parameter(Mandatory = $false)]
     [string]$CsvPath,
-
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\InboxRuleAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
-
-    [Parameter(Mandatory = $false)]
-    [string]$CsvExportPath,
-
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
+    [switch]$ExportCsv,
     [string[]]$SuspiciousKeywords = @(
         "forward", "redirect", "auto forward", "auto reply", "external",
         "transfer", "copy", "bcc", "rule", "delete", "permanent delete",
         "archive", "move to", "mark as read", "report spam",
         "forwarding", "email forwarding", "automatic reply"
     ),
-
-    [Parameter(Mandatory = $false)]
     [string[]]$SuspiciousDomains,
-
-    [Parameter(Mandatory = $false)]
     [int]$MaxRuleReportLength = 5000,
-
-    [Parameter(Mandatory = $false)]
     [switch]$ReportAllRules,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipExchangeConnect
 )
+
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-SuspiciousInboxRule_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-SuspiciousInboxRule_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-SuspiciousInboxRule_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToExchange {
+    if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
+        throw 'ExchangeOnlineManagement module not found. Install: Install-Module ExchangeOnlineManagement -Scope CurrentUser'
+    }
     try {
-        $Module = Get-Module ExchangeOnlineManagement -ListAvailable -ErrorAction SilentlyContinue
-        if (-not $Module) { return $false }
         Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-        Write-Host "Connected to Exchange Online" -ForegroundColor Green
-        return $true
+        Write-Log 'Connected to Exchange Online'
     } catch {
-        Write-Error "Exchange connection failed: $_"
-        return $false
+        Write-Log "Exchange connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -102,85 +171,89 @@ function Test-InboxRuleSuspicious {
 }
 
 # ── MAIN ──
-Write-Host "=== Inbox Rule Exfiltration Detection ===" -ForegroundColor Cyan
+try {
+    Write-Log 'Inbox rule exfiltration detection started.'
 
-if (-not $SkipExchangeConnect) {
-    Connect-ToExchange
-}
-
-if ($CsvPath) {
-    $CsvData = Import-Csv $CsvPath
-    $UserPrincipalNames = $CsvData.UserPrincipalName
-}
-
-if (-not $UserPrincipalNames) {
-    Write-Host "Scanning all mailboxes..." -ForegroundColor Yellow
-    $Mailboxes = Get-Mailbox -ResultSize Unlimited -ErrorAction Stop
-    $UserPrincipalNames = $Mailboxes.UserPrincipalName
-}
-
-Write-Host "Checking $($UserPrincipalNames.Count) mailboxes for inbox rules..." -ForegroundColor Yellow
-
-$i = 0
-foreach ($UPN in $UserPrincipalNames) {
-    $i++
-    if ($i % 100 -eq 0) { Write-Host "  $i / $($UserPrincipalNames.Count)..." -ForegroundColor Gray }
-
-    try {
-        $Rules = Get-InboxRule -Mailbox $UPN -ErrorAction SilentlyContinue
-    } catch {
-        continue
+    if (-not $SkipExchangeConnect) {
+        Connect-ToExchange
     }
 
-    if (-not $Rules) { continue }
+    if ($CsvPath) {
+        $CsvData = Import-Csv -LiteralPath $CsvPath
+        $UserPrincipalNames = $CsvData.UserPrincipalName
+    }
 
-    foreach ($Rule in $Rules) {
-        $SuspiciousFlags = Test-InboxRuleSuspicious -Rule $Rule -Keywords $SuspiciousKeywords -SuspiciousDomains $SuspiciousDomains
-        $IsSuspicious = $SuspiciousFlags.Count -gt 0
+    if (-not $UserPrincipalNames) {
+        Write-Log 'Scanning all mailboxes...'
+        $Mailboxes = Get-Mailbox -ResultSize Unlimited -ErrorAction Stop
+        $UserPrincipalNames = $Mailboxes.UserPrincipalName
+    }
 
-        if ($IsSuspicious -or $ReportAllRules) {
-            $Results.Add([PSCustomObject]@{
-                UserPrincipalName = $UPN
-                RuleName          = $Rule.Name
-                Description       = $Rule.Description
-                Enabled           = $Rule.Enabled
-                Priority          = $Rule.Priority
-                ForwardTo         = ($Rule.ForwardTo -join '; ')
-                RedirectTo        = $Rule.RedirectTo
-                DeleteMessage     = $Rule.DeleteMessage
-                MarkAsRead        = $Rule.MarkAsRead
-                StopProcessing    = $Rule.StopProcessingRules
-                HasAttachment     = $Rule.HasAttachment
-                FlaggedForAction  = $Rule.FlaggedForAction
-                FromAddresses     = ($Rule.FromAddresses -join '; ')
-                SentTo            = ($Rule.SentTo -join '; ')
-                SubjectContains   = ($Rule.SubjectContains -join '; ')
-                BodyContains      = ($Rule.BodyContains -join '; ')
-                SuspiciousFlags   = ($SuspiciousFlags -join '; ')
-                IsSuspicious      = $IsSuspicious
-            })
+    $UserPrincipalNames = @($UserPrincipalNames)
+    Write-Log "Checking $($UserPrincipalNames.Count) mailboxes for inbox rules..."
+
+    $i = 0
+    foreach ($UPN in $UserPrincipalNames) {
+        $i++
+        if ($i % 100 -eq 0) { Write-Log "  $i / $($UserPrincipalNames.Count)..." }
+
+        try {
+            $Rules = Get-InboxRule -Mailbox $UPN -ErrorAction SilentlyContinue
+        } catch {
+            Write-Log "Could not read inbox rules for $UPN : $_" 'WARN'
+            continue
+        }
+
+        if (-not $Rules) { continue }
+
+        foreach ($Rule in $Rules) {
+            $SuspiciousFlags = @(Test-InboxRuleSuspicious -Rule $Rule -Keywords $SuspiciousKeywords -SuspiciousDomains $SuspiciousDomains)
+            $IsSuspicious = $SuspiciousFlags.Count -gt 0
+
+            if ($IsSuspicious -or $ReportAllRules) {
+                $Results.Add([PSCustomObject]@{
+                    UserPrincipalName = $UPN
+                    RuleName          = $Rule.Name
+                    Description       = $Rule.Description
+                    Enabled           = $Rule.Enabled
+                    Priority          = $Rule.Priority
+                    ForwardTo         = ($Rule.ForwardTo -join '; ')
+                    RedirectTo        = ($Rule.RedirectTo -join '; ')
+                    DeleteMessage     = $Rule.DeleteMessage
+                    MarkAsRead        = $Rule.MarkAsRead
+                    StopProcessing    = $Rule.StopProcessingRules
+                    HasAttachment     = $Rule.HasAttachment
+                    FlaggedForAction  = $Rule.FlaggedForAction
+                    FromAddresses     = ($Rule.FromAddresses -join '; ')
+                    SentTo            = ($Rule.SentTo -join '; ')
+                    SubjectContains   = ($Rule.SubjectContains -join '; ')
+                    BodyContains      = ($Rule.BodyContains -join '; ')
+                    SuspiciousFlags   = ($SuspiciousFlags -join '; ')
+                    IsSuspicious      = $IsSuspicious
+                })
+            }
         }
     }
-}
 
-$SuspiciousCount = ($Results | Where-Object { $_.IsSuspicious }).Count
-$TotalRules = $Results.Count
+    $SuspiciousCount = @($Results | Where-Object { $_.IsSuspicious }).Count
+    $TotalRules = $Results.Count
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Mailboxes Scanned: $($UserPrincipalNames.Count)" -ForegroundColor White
-Write-Host "Rules Found: $TotalRules" -ForegroundColor White
-Write-Host "Suspicious Rules: $SuspiciousCount" -ForegroundColor $(if ($SuspiciousCount -gt 0) { "Red" } else { "Green" })
-
-if ($SuspiciousCount -gt 0) {
-    Write-Host "`nSuspicious Rules Detected!" -ForegroundColor Red
-    $Results | Where-Object { $_.IsSuspicious } | ForEach-Object {
-        Write-Host "  [$($_.UserPrincipalName)] $($_.RuleName) : $($_.SuspiciousFlags)" -ForegroundColor Yellow
+    Write-Log 'Summary'
+    Write-Log "Mailboxes Scanned: $($UserPrincipalNames.Count)"
+    Write-Log "Rules Reported: $TotalRules"
+    if ($SuspiciousCount -gt 0) {
+        Write-Log "Suspicious Rules: $SuspiciousCount" 'WARN'
+        $Results | Where-Object { $_.IsSuspicious } | ForEach-Object {
+            Write-Log "  [$($_.UserPrincipalName)] $($_.RuleName) : $($_.SuspiciousFlags)" 'WARN'
+        }
     }
-}
+    else {
+        Write-Log 'Suspicious Rules: 0'
+    }
 
-$HtmlRows = $Results | Sort-Object IsSuspicious -Descending, UserPrincipalName | ForEach-Object {
-    $RowClass = if ($_.IsSuspicious) { "danger" } else { "" }
-    "<tr class='$RowClass'>
+    $HtmlRows = $Results | Sort-Object -Property @{ Expression = 'IsSuspicious'; Descending = $true }, 'UserPrincipalName' | ForEach-Object {
+        $RowClass = if ($_.IsSuspicious) { "danger" } else { "" }
+        "<tr class='$RowClass'>
         <td>$($_.UserPrincipalName)</td>
         <td>$($_.RuleName)</td>
         <td>$($_.Enabled)</td>
@@ -189,9 +262,9 @@ $HtmlRows = $Results | Sort-Object IsSuspicious -Descending, UserPrincipalName |
         <td>$($_.DeleteMessage)</td>
         <td>$($_.SuspiciousFlags)</td>
     </tr>"
-}
+    }
 
-$Html = @"
+    $Html = @"
 <!DOCTYPE html>
 <html>
 <head><title>Inbox Rule Exfiltration Detection</title>
@@ -218,10 +291,15 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+    $Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+    Write-Log "Report written: $htmlPath"
 
-if ($CsvExportPath) {
-    $Results | Export-Csv -Path $CsvExportPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvExportPath" -ForegroundColor Green
+    if ($ExportCsv) {
+        $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+        Write-Log "CSV written: $csvPath"
+    }
+}
+catch {
+    Write-Log "Inbox rule detection failed: $_" 'ERROR'
+    throw
 }

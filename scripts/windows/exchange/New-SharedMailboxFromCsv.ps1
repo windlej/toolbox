@@ -1,42 +1,119 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Creates Exchange Online shared mailboxes in bulk from a CSV and optionally grants delegate permissions.
+
+.DESCRIPTION
+Reads a CSV with the columns DisplayName, Alias, Domain, Users and Department (Users may hold several delegates
+separated by ';'; Department is optional). For each row it creates a shared mailbox <Alias>@<Domain> with New-Mailbox
+(delegates are also set as SendOnBehalf). Optional switches then grant each delegate FullAccess (with automapping),
+SendAs, and/or add them as members of a distribution group named after the mailbox. -HideFromGAL hides the new
+mailbox from address lists.
+
+Nothing is changed unless the script is run for real; use -WhatIf to preview every create/grant without making
+changes. Output is an HTML report of every action and its status (Success / Failed / WhatIf) and a log file in the
+output folder.
+
+.PARAMETER CsvPath
+Input CSV with the columns DisplayName, Alias, Domain, Users, Department.
+
+.PARAMETER OutputPath
+Folder for the report and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER AddUsersAsMembers
+Add each delegate as a member of a distribution group with the same identity as the mailbox.
+
+.PARAMETER GrantFullAccess
+Grant each delegate FullAccess (automapping on) on the new mailbox.
+
+.PARAMETER GrantSendAs
+Grant each delegate SendAs on the new mailbox.
+
+.PARAMETER HideFromGAL
+Hide the new mailbox from the global address list.
+
+.PARAMETER SkipExchangeConnect
+Do not call Connect-ExchangeOnline; use an existing session.
+
+.EXAMPLE
+.\New-SharedMailboxFromCsv.ps1 -CsvPath D:\Input\shared-mailboxes.csv -GrantFullAccess -GrantSendAs -WhatIf -OutputPath D:\Reports
+
+.EXAMPLE
+.\New-SharedMailboxFromCsv.ps1 -CsvPath D:\Input\shared-mailboxes.csv -GrantFullAccess -HideFromGAL -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
+Permissions:  Exchange Online roles Mail Recipient Creation and Mail Recipients (New-Mailbox, Set-Mailbox, Add-MailboxPermission, Add-RecipientPermission); Distribution Groups if -AddUsersAsMembers
+When to use:  Provisioning many shared mailboxes at once, for example during onboarding or a tenant migration.
+Safety:       Changes data (supports -WhatIf)
+Version:      1.1
+#>
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory = $true)]
     [string]$CsvPath,
 
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\SharedMailboxProvision_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
-
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
     [switch]$AddUsersAsMembers,
-
-    [Parameter(Mandatory = $false)]
     [switch]$GrantFullAccess,
-
-    [Parameter(Mandatory = $false)]
     [switch]$GrantSendAs,
-
-    [Parameter(Mandatory = $false)]
     [switch]$HideFromGAL,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$WhatIf,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipExchangeConnect
 )
+
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force -WhatIf:$false | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line -WhatIf:$false }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "New-SharedMailboxFromCsv_$stamp.html"
+$script:LogFile = Join-Path $outDir "New-SharedMailboxFromCsv_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToExchange {
-    try {
-        $Module = Get-Module ExchangeOnlineManagement -ListAvailable -ErrorAction SilentlyContinue
-        if (-not $Module) { return $false }
-        Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-        Write-Host "Connected to Exchange Online" -ForegroundColor Green
-        return $true
-    } catch {
-        Write-Error "Exchange connection failed: $_"
-        return $false
+    if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
+        throw 'ExchangeOnlineManagement module not found. Install: Install-Module ExchangeOnlineManagement -Scope CurrentUser'
     }
+    try {
+        Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
+        Write-Log 'Connected to Exchange Online'
+    } catch {
+        Write-Log "Exchange connection failed: $_" 'ERROR'
+        throw
+    }
+}
+
+function Write-Result {
+    param($Mailbox, $Action, $Status, $Detail)
+    $Results.Add([PSCustomObject]@{
+        UserPrincipalName = $Mailbox
+        Action            = $Action
+        Status            = $Status
+        Detail            = $Detail
+        Timestamp         = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    })
 }
 
 function New-SharedMailbox {
@@ -47,8 +124,8 @@ function New-SharedMailbox {
     $UPN = "$Alias@$($CsvRow.Domain)"
     $DisplayName = $Name
 
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Would create shared mailbox: $UPN ($DisplayName)" -ForegroundColor Yellow
+    if (-not $PSCmdlet.ShouldProcess($UPN, "Create shared mailbox '$DisplayName'")) {
+        Write-Log "[WhatIf] Would create shared mailbox: $UPN ($DisplayName)"
         Write-Result -Mailbox $UPN -Action "Create" -Status "WhatIf" -Detail ""
         return $UPN
     }
@@ -72,11 +149,11 @@ function New-SharedMailbox {
         }
 
         Write-Result -Mailbox $UPN -Action "Create" -Status "Success" -Detail ""
-        Write-Host "  Created shared mailbox: $UPN" -ForegroundColor Green
+        Write-Log "  Created shared mailbox: $UPN"
         return $UPN
     } catch {
         Write-Result -Mailbox $UPN -Action "Create" -Status "Failed" -Detail $_.Exception.Message
-        Write-Warning "  Failed to create $UPN : $_"
+        Write-Log "  Failed to create $UPN : $_" 'WARN'
         return $null
     }
 }
@@ -91,102 +168,99 @@ function Add-UserToSharedMailbox {
 
     foreach ($User in $Users) {
         if ($GrantFullAccess) {
-            if ($WhatIf) {
+            if (-not $PSCmdlet.ShouldProcess($Mailbox, "Grant FullAccess to $User")) {
                 Write-Result -Mailbox $Mailbox -Action "GrantFullAccess" -Status "WhatIf" -Detail $User
-                continue
             }
-            try {
-                Add-MailboxPermission -Identity $Mailbox -User $User -AccessRights FullAccess -AutoMapping $true -ErrorAction Stop
-                Write-Result -Mailbox $Mailbox -Action "GrantFullAccess" -Status "Success" -Detail $User
-                Write-Host "    FullAccess granted to $User" -ForegroundColor Green
-            } catch {
-                Write-Result -Mailbox $Mailbox -Action "GrantFullAccess" -Status "Failed" -Detail "$User : $_"
+            else {
+                try {
+                    Add-MailboxPermission -Identity $Mailbox -User $User -AccessRights FullAccess -AutoMapping $true -ErrorAction Stop | Out-Null
+                    Write-Result -Mailbox $Mailbox -Action "GrantFullAccess" -Status "Success" -Detail $User
+                    Write-Log "    FullAccess granted to $User"
+                } catch {
+                    Write-Result -Mailbox $Mailbox -Action "GrantFullAccess" -Status "Failed" -Detail "$User : $_"
+                    Write-Log "    FullAccess grant failed for $User : $_" 'WARN'
+                }
             }
         }
 
         if ($GrantSendAs) {
-            if ($WhatIf) {
+            if (-not $PSCmdlet.ShouldProcess($Mailbox, "Grant SendAs to $User")) {
                 Write-Result -Mailbox $Mailbox -Action "GrantSendAs" -Status "WhatIf" -Detail $User
-                continue
             }
-            try {
-                Add-RecipientPermission -Identity $Mailbox -Trustee $User -AccessRights SendAs -Confirm:$false -ErrorAction Stop
-                Write-Result -Mailbox $Mailbox -Action "GrantSendAs" -Status "Success" -Detail $User
-                Write-Host "    SendAs granted to $User" -ForegroundColor Green
-            } catch {
-                Write-Result -Mailbox $Mailbox -Action "GrantSendAs" -Status "Failed" -Detail "$User : $_"
+            else {
+                try {
+                    Add-RecipientPermission -Identity $Mailbox -Trustee $User -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
+                    Write-Result -Mailbox $Mailbox -Action "GrantSendAs" -Status "Success" -Detail $User
+                    Write-Log "    SendAs granted to $User"
+                } catch {
+                    Write-Result -Mailbox $Mailbox -Action "GrantSendAs" -Status "Failed" -Detail "$User : $_"
+                    Write-Log "    SendAs grant failed for $User : $_" 'WARN'
+                }
             }
         }
 
         if ($AddUsersAsMembers) {
-            try {
-                Add-DistributionGroupMember -Identity $Mailbox -Member $User -ErrorAction SilentlyContinue
-            } catch { }
+            if ($PSCmdlet.ShouldProcess($Mailbox, "Add $User as distribution group member")) {
+                try {
+                    Add-DistributionGroupMember -Identity $Mailbox -Member $User -ErrorAction SilentlyContinue
+                } catch {
+                    Write-Log "    Could not add $User to group $Mailbox : $_" 'WARN'
+                }
+            }
         }
     }
 }
 
-function Write-Result {
-    param($Mailbox, $Action, $Status, $Detail)
-    $Results.Add([PSCustomObject]@{
-        UserPrincipalName = $Mailbox
-        Action            = $Action
-        Status            = $Status
-        Detail            = $Detail
-        Timestamp         = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    })
-}
-
 # ── MAIN ──
-Write-Host "=== Shared Mailbox Auto-Provision ===" -ForegroundColor Cyan
+try {
+    Write-Log 'Shared mailbox provisioning started.'
 
-if (-not (Test-Path $CsvPath)) {
-    Write-Error "CSV not found: $CsvPath"
-    return
-}
-
-$Mailboxes = Import-Csv $CsvPath
-Write-Host "Provisioning $($Mailboxes.Count) shared mailboxes from: $CsvPath" -ForegroundColor Yellow
-
-Write-Host "CSV columns expected: DisplayName, Alias, Domain, Users, Department" -ForegroundColor Gray
-Write-Host "Users can be semicolon-separated for multiple delegates" -ForegroundColor Gray
-
-if (-not $SkipExchangeConnect) {
-    Connect-ToExchange
-}
-
-foreach ($Entry in $Mailboxes) {
-    Write-Host "`nProcessing: $($Entry.DisplayName)" -ForegroundColor Yellow
-
-    $UPN = New-SharedMailbox -CsvRow $Entry
-    if (-not $UPN) { continue }
-
-    if ($Entry.Users) {
-        $UserList = $Entry.Users -split ';' | ForEach-Object { $_.Trim() }
-        Add-UserToSharedMailbox -Mailbox $UPN -Users $UserList
+    if (-not (Test-Path -LiteralPath $CsvPath)) {
+        throw "CSV not found: $CsvPath"
     }
-}
 
-$SuccessCount = ($Results | Where-Object { $_.Status -eq "Success" }).Count
-$FailCount = ($Results | Where-Object { $_.Status -eq "Failed" }).Count
-$WhatIfCount = ($Results | Where-Object { $_.Status -eq "WhatIf" }).Count
+    $Mailboxes = @(Import-Csv -LiteralPath $CsvPath)
+    Write-Log "Provisioning $($Mailboxes.Count) shared mailboxes from: $CsvPath"
+    Write-Log 'CSV columns expected: DisplayName, Alias, Domain, Users, Department (Users may be semicolon-separated)'
 
-$HtmlRows = $Results | ForEach-Object {
-    $RowClass = switch ($_.Status) {
-        "Success" { "" }
-        "Failed" { "danger" }
-        "WhatIf" { "warning" }
-        default { "" }
+    if (-not $SkipExchangeConnect) {
+        Connect-ToExchange
     }
-    "<tr class='$RowClass'>
+
+    foreach ($Entry in $Mailboxes) {
+        Write-Log "Processing: $($Entry.DisplayName)"
+
+        $UPN = New-SharedMailbox -CsvRow $Entry
+        if (-not $UPN) { continue }
+
+        if ($Entry.Users) {
+            $UserList = @($Entry.Users -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            Add-UserToSharedMailbox -Mailbox $UPN -Users $UserList
+        }
+    }
+
+    $SuccessCount = @($Results | Where-Object { $_.Status -eq "Success" }).Count
+    $FailCount = @($Results | Where-Object { $_.Status -eq "Failed" }).Count
+    $WhatIfCount = @($Results | Where-Object { $_.Status -eq "WhatIf" }).Count
+
+    $HtmlRows = $Results | ForEach-Object {
+        $RowClass = switch ($_.Status) {
+            "Success" { "" }
+            "Failed" { "danger" }
+            "WhatIf" { "warning" }
+            default { "" }
+        }
+        "<tr class='$RowClass'>
         <td>$($_.UserPrincipalName)</td>
         <td>$($_.Action)</td>
         <td>$($_.Status)</td>
         <td>$($_.Detail)</td>
     </tr>"
-}
+    }
 
-$Html = @"
+    $CsvName = Split-Path -Leaf $CsvPath
+
+    $Html = @"
 <!DOCTYPE html>
 <html>
 <head><title>Shared Mailbox Provisioning Report</title>
@@ -203,7 +277,7 @@ td { padding: 5px 8px; border-bottom: 1px solid #ddd; }
 <body>
 <h1>Shared Mailbox Provisioning Report</h1>
 <div class='summary'>
-    <strong>CSV:</strong> $CsvPath |
+    <strong>CSV:</strong> $CsvName |
     <strong>Total:</strong> $($Mailboxes.Count) |
     <strong>Success:</strong> $SuccessCount |
     <strong>Failed:</strong> $FailCount |
@@ -216,6 +290,11 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
-Write-Host "Success: $SuccessCount | Failed: $FailCount | WhatIf: $WhatIfCount"
+    $Html | Out-File -LiteralPath $htmlPath -Encoding UTF8 -WhatIf:$false
+    Write-Log "Report written: $htmlPath"
+    Write-Log "Success: $SuccessCount | Failed: $FailCount | WhatIf: $WhatIfCount"
+}
+catch {
+    Write-Log "Shared mailbox provisioning failed: $_" 'ERROR'
+    throw
+}

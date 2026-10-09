@@ -1,44 +1,111 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+Finds mailbox-level forwarding and inbox-rule forwarding/redirects, and can optionally remove them.
+
+.DESCRIPTION
+Scans Exchange Online mailboxes (all mailboxes, a list of UPNs, or a CSV with a UserPrincipalName column) for
+mail forwarding. With -DetectMailboxForwarding it reports ForwardingAddress / ForwardingSmtpAddress set on the
+mailbox. With -DetectInboxRuleForwarding it reports inbox rules that use ForwardTo or RedirectTo. Each finding is
+flagged as external when the target domain differs from the tenant's default accepted domain.
+
+The script is read-only unless -RemoveForwarding is given. With -RemoveForwarding it clears the mailbox forwarding
+properties and disables the offending inbox rules (the rules are disabled, not deleted). Use -WhatIf to preview.
+
+Output is an HTML report (primary) with external forwarders highlighted, an optional CSV (-ExportCsv) and a log file,
+all written to the output folder.
+
+.PARAMETER UserPrincipalNames
+Optional list of mailboxes (UPNs) to check. If neither this nor -CsvPath is given, all mailboxes are scanned.
+
+.PARAMETER CsvPath
+Optional input CSV with a UserPrincipalName column listing the mailboxes to check.
+
+.PARAMETER OutputPath
+Folder for the report, CSV and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write the findings to a CSV next to the HTML report.
+
+.PARAMETER DetectMailboxForwarding
+Check the ForwardingAddress / ForwardingSmtpAddress properties on each mailbox.
+
+.PARAMETER DetectInboxRuleForwarding
+Check each mailbox's inbox rules for ForwardTo / RedirectTo actions.
+
+.PARAMETER RemoveForwarding
+Clear detected mailbox forwarding and disable detected inbox rules. Supports -WhatIf and -Confirm.
+
+.PARAMETER SkipExchangeConnect
+Do not call Connect-ExchangeOnline; use an existing session.
+
+.EXAMPLE
+.\Get-MailboxForwardingRule.ps1 -DetectMailboxForwarding -DetectInboxRuleForwarding -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-MailboxForwardingRule.ps1 -CsvPath D:\Input\users.csv -DetectInboxRuleForwarding -RemoveForwarding -WhatIf -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
+
+.NOTES
+Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
+Permissions:  Exchange Online roles View-Only Recipients (report); Mail Recipients (to use -RemoveForwarding)
+When to use:  After a suspected account compromise, during a security review, or before offboarding to find mail leaving the tenant.
+Safety:       Changes data (supports -WhatIf)
+Version:      1.1
+#>
+[CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory = $false)]
     [string[]]$UserPrincipalNames,
-
-    [Parameter(Mandatory = $false)]
     [string]$CsvPath,
-
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\ForwardingRules_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
-
-    [Parameter(Mandatory = $false)]
-    [string]$CsvExportPath,
-
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
+    [switch]$ExportCsv,
     [switch]$DetectMailboxForwarding,
-
-    [Parameter(Mandatory = $false)]
     [switch]$DetectInboxRuleForwarding,
-
-    [Parameter(Mandatory = $false)]
     [switch]$RemoveForwarding,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$WhatIf,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipExchangeConnect
 )
+
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force -WhatIf:$false | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line -WhatIf:$false }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-MailboxForwardingRule_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-MailboxForwardingRule_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-MailboxForwardingRule_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
 
 function Connect-ToExchange {
+    if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
+        throw 'ExchangeOnlineManagement module not found. Install: Install-Module ExchangeOnlineManagement -Scope CurrentUser'
+    }
     try {
-        $Module = Get-Module ExchangeOnlineManagement -ListAvailable -ErrorAction SilentlyContinue
-        if (-not $Module) { return $false }
         Connect-ExchangeOnline -ShowBanner:$false -ErrorAction Stop
-        Write-Host "Connected to Exchange Online" -ForegroundColor Green
-        return $true
+        Write-Log 'Connected to Exchange Online'
     } catch {
-        Write-Error "Exchange connection failed: $_"
-        return $false
+        Write-Log "Exchange connection failed: $_" 'ERROR'
+        throw
     }
 }
 
@@ -65,7 +132,7 @@ function Get-MailboxForwarding {
         $Mailbox = Get-Mailbox -Identity $Identity -ErrorAction SilentlyContinue
         if (-not $Mailbox) { return @() }
 
-        $Results = @()
+        $Found = @()
 
         if ($Mailbox.ForwardingAddress -or $Mailbox.ForwardingSmtpAddress) {
             $Target = if ($Mailbox.ForwardingAddress) {
@@ -76,7 +143,7 @@ function Get-MailboxForwarding {
 
             $IsExternal = Test-ExternalDomain -Address $Target -PrimaryDomain $PrimaryDomain
 
-            $Results += [PSCustomObject]@{
+            $Found += [PSCustomObject]@{
                 UserPrincipalName  = $Identity
                 ForwardingType     = "Mailbox Forwarding"
                 Target             = $Target
@@ -87,7 +154,7 @@ function Get-MailboxForwarding {
             }
         }
 
-        return $Results
+        return $Found
     } catch { return @() }
 }
 
@@ -96,7 +163,7 @@ function Get-InboxRuleForwarding {
 
     try {
         $Rules = Get-InboxRule -Mailbox $Identity -ErrorAction SilentlyContinue
-        $Results = @()
+        $Found = @()
 
         foreach ($Rule in $Rules) {
             $ForwardTargets = @()
@@ -106,7 +173,7 @@ function Get-InboxRuleForwarding {
             foreach ($Target in $ForwardTargets) {
                 $IsExternal = Test-ExternalDomain -Address $Target -PrimaryDomain $PrimaryDomain
 
-                $Results += [PSCustomObject]@{
+                $Found += [PSCustomObject]@{
                     UserPrincipalName  = $Identity
                     ForwardingType     = if ($Rule.RedirectTo) { "Inbox Rule - Redirect" } else { "Inbox Rule - Forward" }
                     Target             = $Target
@@ -118,15 +185,14 @@ function Get-InboxRuleForwarding {
             }
         }
 
-        return $Results
+        return $Found
     } catch { return @() }
 }
 
 function Remove-MailboxForwardingSetting {
     param([string]$Identity)
 
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Would remove mailbox forwarding for $Identity" -ForegroundColor Yellow
+    if (-not $PSCmdlet.ShouldProcess($Identity, 'Remove mailbox forwarding')) {
         return "WhatIf"
     }
 
@@ -134,7 +200,7 @@ function Remove-MailboxForwardingSetting {
         Set-Mailbox -Identity $Identity -ForwardingAddress $null -ForwardingSmtpAddress $null -ErrorAction Stop
         return "Removed"
     } catch {
-        Write-Warning "Failed to remove forwarding for $Identity : $_"
+        Write-Log "Failed to remove forwarding for $Identity : $_" 'WARN'
         return "Failed"
     }
 }
@@ -142,8 +208,7 @@ function Remove-MailboxForwardingSetting {
 function Remove-InboxRuleForwarding {
     param([string]$Identity, [string]$RuleName)
 
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Would disable inbox rule '$RuleName' for $Identity" -ForegroundColor Yellow
+    if (-not $PSCmdlet.ShouldProcess("$Identity\$RuleName", 'Disable inbox rule')) {
         return "WhatIf"
     }
 
@@ -151,75 +216,81 @@ function Remove-InboxRuleForwarding {
         Disable-InboxRule -Identity "$Identity\$RuleName" -Confirm:$false -ErrorAction Stop
         return "Disabled"
     } catch {
-        Write-Warning "Failed to disable rule '$RuleName' for $Identity : $_"
+        Write-Log "Failed to disable rule '$RuleName' for $Identity : $_" 'WARN'
         return "Failed"
     }
 }
 
 # ── MAIN ──
-Write-Host "=== Forwarding Rule Detection ===" -ForegroundColor Cyan
-Write-Host "Scope: $((if($DetectMailboxForwarding){'Mailbox '})+$(if($DetectInboxRuleForwarding){'+ Inbox Rules'}))" -ForegroundColor White
+try {
+    Write-Log 'Forwarding rule detection started.'
+    $scope = @()
+    if ($DetectMailboxForwarding)   { $scope += 'Mailbox forwarding' }
+    if ($DetectInboxRuleForwarding) { $scope += 'Inbox rules' }
+    Write-Log "Scope: $($scope -join ' + ')"
+    if ($RemoveForwarding) { Write-Log 'RemoveForwarding is set: detected forwarding will be removed/disabled (honours -WhatIf).' 'WARN' }
 
-if (-not $SkipExchangeConnect) {
-    Connect-ToExchange
-}
+    if (-not $SkipExchangeConnect) {
+        Connect-ToExchange
+    }
 
-$PrimaryDomain = Get-PrimaryDomain
-Write-Host "Primary domain: $PrimaryDomain" -ForegroundColor Gray
+    $PrimaryDomain = Get-PrimaryDomain
+    Write-Log "Primary domain: $PrimaryDomain"
 
-if ($CsvPath) {
-    $CsvData = Import-Csv $CsvPath
-    $UserPrincipalNames = $CsvData.UserPrincipalName
-}
+    if ($CsvPath) {
+        $CsvData = Import-Csv -LiteralPath $CsvPath
+        $UserPrincipalNames = $CsvData.UserPrincipalName
+    }
 
-if (-not $UserPrincipalNames) {
-    Write-Host "Scanning all mailboxes..." -ForegroundColor Yellow
-    $Mailboxes = Get-Mailbox -ResultSize Unlimited -ErrorAction Stop
-    $UserPrincipalNames = $Mailboxes.UserPrincipalName
-}
+    if (-not $UserPrincipalNames) {
+        Write-Log 'Scanning all mailboxes...'
+        $Mailboxes = Get-Mailbox -ResultSize Unlimited -ErrorAction Stop
+        $UserPrincipalNames = $Mailboxes.UserPrincipalName
+    }
 
-Write-Host "Checking $($UserPrincipalNames.Count) mailboxes..." -ForegroundColor Yellow
+    $UserPrincipalNames = @($UserPrincipalNames)
+    Write-Log "Checking $($UserPrincipalNames.Count) mailboxes..."
 
-$i = 0
-foreach ($UPN in $UserPrincipalNames) {
-    $i++
-    if ($i % 100 -eq 0) { Write-Host "  $i / $($UserPrincipalNames.Count)..." -ForegroundColor Gray }
+    $i = 0
+    foreach ($UPN in $UserPrincipalNames) {
+        $i++
+        if ($i % 100 -eq 0) { Write-Log "  $i / $($UserPrincipalNames.Count)..." }
 
-    if ($DetectMailboxForwarding) {
-        $Forwarding = Get-MailboxForwarding -Identity $UPN -PrimaryDomain $PrimaryDomain
-        foreach ($F in $Forwarding) {
-            if ($RemoveForwarding -and $F.Target) {
-                $F.Action = Remove-MailboxForwardingSetting -Identity $UPN
+        if ($DetectMailboxForwarding) {
+            $Forwarding = Get-MailboxForwarding -Identity $UPN -PrimaryDomain $PrimaryDomain
+            foreach ($F in $Forwarding) {
+                if ($RemoveForwarding -and $F.Target) {
+                    $F.Action = Remove-MailboxForwardingSetting -Identity $UPN
+                }
+                $Results.Add($F)
             }
-            $Results.Add($F)
+        }
+
+        if ($DetectInboxRuleForwarding) {
+            $RuleForwarding = Get-InboxRuleForwarding -Identity $UPN -PrimaryDomain $PrimaryDomain
+            foreach ($F in $RuleForwarding) {
+                if ($RemoveForwarding -and $F.Target) {
+                    $RuleName = ($F.Source -replace 'Rule: ', '')
+                    $F.Action = Remove-InboxRuleForwarding -Identity $UPN -RuleName $RuleName
+                }
+                $Results.Add($F)
+            }
         }
     }
 
-    if ($DetectInboxRuleForwarding) {
-        $RuleForwarding = Get-InboxRuleForwarding -Identity $UPN -PrimaryDomain $PrimaryDomain
-        foreach ($F in $RuleForwarding) {
-            if ($RemoveForwarding -and $F.Target) {
-                $RuleName = ($F.Source -replace 'Rule: ', '')
-                $F.Action = Remove-InboxRuleForwarding -Identity $UPN -RuleName $RuleName
-            }
-            $Results.Add($F)
-        }
-    }
-}
+    $ExternalCount = @($Results | Where-Object { $_.IsExternal }).Count
+    $InternalCount = @($Results | Where-Object { -not $_.IsExternal }).Count
+    $RemovedCount = @($Results | Where-Object { $_.Action -eq "Removed" -or $_.Action -eq "Disabled" }).Count
 
-$ExternalCount = ($Results | Where-Object { $_.IsExternal }).Count
-$InternalCount = ($Results | Where-Object { -not $_.IsExternal }).Count
-$RemovedCount = ($Results | Where-Object { $_.Action -eq "Removed" -or $_.Action -eq "Disabled" }).Count
+    Write-Log 'Summary'
+    Write-Log "Total Forwarding Rules: $($Results.Count)"
+    Write-Log "  External: $ExternalCount"
+    Write-Log "  Internal: $InternalCount"
+    Write-Log "  Removed/Disabled: $RemovedCount"
 
-Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-Write-Host "Total Forwarding Rules: $($Results.Count)" -ForegroundColor White
-Write-Host "  External: $ExternalCount" -ForegroundColor $(if ($ExternalCount -gt 0) { "Red" } else { "Green" })
-Write-Host "  Internal: $InternalCount" -ForegroundColor Gray
-Write-Host "  Removed/Disabled: $RemovedCount" -ForegroundColor Yellow
-
-$HtmlRows = $Results | Sort-Object IsExternal -Descending, UserPrincipalName | ForEach-Object {
-    $RowClass = if ($_.IsExternal) { "danger" } else { "" }
-    "<tr class='$RowClass'>
+    $HtmlRows = $Results | Sort-Object -Property @{ Expression = 'IsExternal'; Descending = $true }, 'UserPrincipalName' | ForEach-Object {
+        $RowClass = if ($_.IsExternal) { "danger" } else { "" }
+        "<tr class='$RowClass'>
         <td>$($_.UserPrincipalName)</td>
         <td>$($_.ForwardingType)</td>
         <td>$($_.Target)</td>
@@ -227,9 +298,9 @@ $HtmlRows = $Results | Sort-Object IsExternal -Descending, UserPrincipalName | F
         <td>$($_.Source)</td>
         <td>$($_.Action)</td>
     </tr>"
-}
+    }
 
-$Html = @"
+    $Html = @"
 <!DOCTYPE html>
 <html>
 <head><title>Forwarding Rule Detection Report</title>
@@ -258,10 +329,15 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+    $Html | Out-File -LiteralPath $htmlPath -Encoding UTF8 -WhatIf:$false
+    Write-Log "Report written: $htmlPath"
 
-if ($CsvExportPath) {
-    $Results | Export-Csv -Path $CsvExportPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvExportPath" -ForegroundColor Green
+    if ($ExportCsv) {
+        $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+        Write-Log "CSV written: $csvPath"
+    }
+}
+catch {
+    Write-Log "Forwarding rule detection failed: $_" 'ERROR'
+    throw
 }
