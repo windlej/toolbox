@@ -11,7 +11,8 @@ Each rule is flagged when it allows traffic from any source, to any destination,
 protocol, and is rated Low / Medium / High / Critical (Critical = inbound allow from Internet/any to all ports).
 Default platform rules are skipped unless -IncludeDefaultRules is used.
 
-Output is an HTML report (primary) with a summary and one row per rule, plus an optional CSV of the same data.
+Output is an HTML report (primary) with a summary and one row per rule, sorted by severity (Critical, High,
+Medium, Low) then rule priority, plus an optional CSV of the same data.
 With -FlagHighRiskOnly only rules rated above Low are included. The script makes no changes to Azure.
 
 .PARAMETER SubscriptionIds
@@ -46,7 +47,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Network modules)
 Permissions:  Azure RBAC Reader on each subscription being scanned
 When to use:  Security review of a new customer tenant, before a pen test, or to find RDP/SSH/any-any rules open to the Internet.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -224,7 +225,8 @@ $MediumCount = @($FinalResults | Where-Object { $_.Risk -eq "Medium" }).Count
 
 Write-Log "Summary: Total rules $($FinalResults.Count) | Critical $CriticalCount | High $HighCount | Medium $MediumCount"
 
-$HtmlRows = $FinalResults | Sort-Object Risk, Priority | ForEach-Object {
+$RiskOrder = @{ 'Critical' = 0; 'High' = 1; 'Medium' = 2; 'Low' = 3 }
+$HtmlRows = $FinalResults | Sort-Object @{ Expression = { $RiskOrder[[string]$_.Risk] } }, Priority | ForEach-Object {
     $RowClass = switch ($_.Risk) {
         "Critical" { "danger" }
         "High" { "danger" }
