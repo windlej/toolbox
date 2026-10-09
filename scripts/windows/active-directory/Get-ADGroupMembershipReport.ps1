@@ -21,7 +21,8 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 Optional. Names of the groups to audit. If omitted, groups are selected with -GroupNameFilter.
 
 .PARAMETER GroupNameFilter
-Wildcard (-like) filter on group Name used when -GroupNames is not given. Default '*' (all groups).
+Filter on group Name used when -GroupNames is not given. Default '*' (all groups). '*' is the only wildcard;
+all other characters, including quotes, parentheses and backslashes, are matched literally.
 
 .PARAMETER ExportCsv
 Also write a CSV next to the HTML report.
@@ -181,7 +182,9 @@ function Get-GroupMembershipDetail {
 if ($GroupNames) {
     $TargetGroups = $GroupNames
 } else {
-    $TargetGroups = (Get-ADGroup -Filter "Name -like '$GroupNameFilter'" | Sort-Object Name).Name
+    # RFC 4515 escaping so the value cannot alter the filter; '*' stays a wildcard.
+    $EscapedFilter = $GroupNameFilter.Replace('\', '\5c').Replace('(', '\28').Replace(')', '\29')
+    $TargetGroups = (Get-ADGroup -LDAPFilter "(name=$EscapedFilter)" | Sort-Object Name).Name
 }
 
 $AuditResults = foreach ($GroupName in $TargetGroups) {
