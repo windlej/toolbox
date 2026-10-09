@@ -980,12 +980,22 @@ function Show-Banner {
     $Version = "1.0.0"
     $Width = Get-ConsoleWidth
 
-    $Top = "╔" + ("═" * ($Width - 2)) + "╗"
-    $Pad = $Width - 40
-    $TitleLine = "║" + (" " * [Math]::Floor(($Pad)/2)) + "Toolbox v$Version — Infrastructure Automation" + (" " * [Math]::Ceiling(($Pad)/2)) + "║"
-    $ScriptCount = (Get-ScriptCatalog).Count
-    $StatusLine = "║" + (" " * [Math]::Floor(($Pad)/2)) + "$ScriptCount scripts · 6 categories" + (" " * [Math]::Ceiling(($Pad)/2)) + "║"
-    $Bottom = "╚" + ("═" * ($Width - 2)) + "╝"
+    $Catalog = Get-ScriptCatalog
+    $CategoryCount = ($Catalog | Group-Object CategoryKey).Count
+    $Inner = $Width - 2
+    $Lines = @(
+        "Toolbox v$Version — Infrastructure Automation",
+        "$($Catalog.Count) scripts · $CategoryCount categories"
+    )
+    $Center = {
+        param([string]$Text)
+        $Pad = [Math]::Max(0, $Inner - $Text.Length)
+        "║" + (" " * [Math]::Floor($Pad / 2)) + $Text + (" " * [Math]::Ceiling($Pad / 2)) + "║"
+    }
+    $Top = "╔" + ("═" * $Inner) + "╗"
+    $TitleLine = & $Center $Lines[0]
+    $StatusLine = & $Center $Lines[1]
+    $Bottom = "╚" + ("═" * $Inner) + "╝"
 
     Write-Host $Top -ForegroundColor Cyan
     Write-Host $TitleLine -ForegroundColor Cyan
