@@ -1,22 +1,87 @@
+#Requires -Version 5.1
+#Requires -Modules ActiveDirectory
+
+<#
+.SYNOPSIS
+Runs health checks against every domain controller and writes an HTML report.
+
+.DESCRIPTION
+For each domain controller (all DCs in the domain, or those given in -DomainControllers) the script checks
+connectivity (ping), the Netlogon service, dcdiag results (unless -SkipDcdiag), replication status via
+repadmin /showrepl (unless -SkipReplication), NTP source via w32tm and FSMO role holders. The HTML report
+shows the domain and forest mode, the DC list, summary counts and one row per check coloured by Pass, Warn or
+Fail. Requires dcdiag, repadmin and w32tm on the machine running the script (installed with the AD DS RSAT tools).
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER DomainControllers
+Optional list of domain controller names to check. Default is every DC in the current domain.
+
+.PARAMETER SkipReplication
+Skip the repadmin replication check.
+
+.PARAMETER SkipDcdiag
+Skip the dcdiag check (the slowest check).
+
+.EXAMPLE
+.\Test-DomainHealth.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Test-DomainHealth.ps1 -DomainControllers dc01.contoso.com,dc02.contoso.com -SkipDcdiag -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (RSAT ActiveDirectory module plus dcdiag/repadmin/w32tm, domain-joined machine)
+Permissions:  Domain user with network access to the DCs; Domain Admin is recommended for complete dcdiag and repadmin results
+When to use:  Start of an engagement, after a DC migration or outage, or as a routine domain health check.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\DomainHealth_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
-
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
     [string[]]$DomainControllers,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipReplication,
-
-    [Parameter(Mandatory = $false)]
     [switch]$SkipDcdiag
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Test-DomainHealth_$stamp.html"
+$script:LogFile = Join-Path $outDir "Test-DomainHealth_$stamp.log"
 
 $Results = @()
 $Issues = @()
 
 function Invoke-DcdiagCheck {
     param([string]$Server)
+
+    # Windows PowerShell 5.1 turns native stderr into terminating errors under 'Stop'; keep native output as data.
+    $ErrorActionPreference = 'Continue'
 
     $dcdiagOutput = dcdiag /s:$Server /q 2>&1
     $Parsed = [PSCustomObject]@{
@@ -36,6 +101,9 @@ function Invoke-DcdiagCheck {
 
 function Test-ReplicationHealth {
     param([string]$Server)
+
+    # Windows PowerShell 5.1 turns native stderr into terminating errors under 'Stop'; keep native output as data.
+    $ErrorActionPreference = 'Continue'
 
     $repadminOutput = repadmin /showrepl $Server 2>&1
     $LastSuccess = $repadminOutput | Select-String -Pattern "last success"
@@ -83,6 +151,9 @@ function Test-NetlogonService {
 
 function Test-NtpSync {
     param([string]$Server)
+
+    # Windows PowerShell 5.1 turns native stderr into terminating errors under 'Stop'; keep native output as data.
+    $ErrorActionPreference = 'Continue'
 
     try {
         $w32tm = w32tm /query /computer:$Server /status 2>&1
@@ -137,18 +208,18 @@ function Test-FsmoRoles {
 Import-Module ActiveDirectory -ErrorAction Stop
 
 if (-not $DomainControllers) {
-    $DomainControllers = (Get-ADDomainController -Filter *).Name | Sort-Object
+    $DomainControllers = @((Get-ADDomainController -Filter *).Name | Sort-Object)
 }
 
 $DomainInfo = Get-ADDomain
 $ForestInfo = Get-ADForest
 
-Write-Host "Domain: $($DomainInfo.DNSRoot)" -ForegroundColor Cyan
-Write-Host "Forest: $($ForestInfo.ForestMode)" -ForegroundColor Cyan
-Write-Host "DCs Found: $($DomainControllers.Count)" -ForegroundColor Green
+Write-Log "Domain: $($DomainInfo.DNSRoot)"
+Write-Log "Forest: $($ForestInfo.ForestMode)"
+Write-Log "DCs Found: $(@($DomainControllers).Count)"
 
 foreach ($DC in $DomainControllers) {
-    Write-Host "Checking $DC..." -ForegroundColor Yellow
+    Write-Log "Checking $DC..."
 
     try {
         $Reachable = Test-Connection -ComputerName $DC -Count 1 -Quiet
@@ -176,8 +247,8 @@ foreach ($DC in $DomainControllers) {
     $Results += Test-FsmoRoles $DC
 }
 
-$Failures = $Results | Where-Object { $_.Status -eq "Fail" -or $_.Status -eq "Unhealthy" }
-$Warnings = $Results | Where-Object { $_.Status -eq "Warn" }
+$Failures = @($Results | Where-Object { $_.Status -eq "Fail" -or $_.Status -eq "Unhealthy" })
+$Warnings = @($Results | Where-Object { $_.Status -eq "Warn" })
 
 $HtmlRows = $Results | ForEach-Object {
     $RowClass = switch ($_.Status) {
@@ -230,12 +301,12 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
 
-Write-Host "`nReport: $ReportPath" -ForegroundColor Green
-Write-Host "Summary: $($Results.Count) checks | $($Failures.Count) failures | $($Warnings.Count) warnings" -ForegroundColor Cyan
+Write-Log "Report: $htmlPath"
+Write-Log "Summary: $($Results.Count) checks | $($Failures.Count) failures | $($Warnings.Count) warnings"
 
 if ($Failures.Count -gt 0) {
-    Write-Host "FAILURES:" -ForegroundColor Red
-    $Failures | ForEach-Object { Write-Host "  [$($_.Server)] $($_.Check): $($_.Details)" -ForegroundColor Red }
+    Write-Log "FAILURES:" 'ERROR'
+    $Failures | ForEach-Object { Write-Log "  [$($_.Server)] $($_.Check): $($_.Details)" 'ERROR' }
 }

@@ -1,22 +1,88 @@
+#Requires -Version 5.1
+#Requires -Modules ActiveDirectory
+
+<#
+.SYNOPSIS
+Reports the domain password policy and, optionally, per-user password compliance as HTML (optional CSV).
+
+.DESCRIPTION
+Reads the default domain password policy and any fine-grained password policies and lists them in an HTML report.
+With -AuditUsers it also evaluates every user (enabled only unless -IncludeDisabledUsers) and classifies each
+password as OK, WARNING, CRITICAL, EXPIRED or NEVER_EXPIRES based on the days until expiry and the thresholds
+-PasswordAgeWarningDays / -PasswordAgeCriticalDays. The user table shows name, account, status, last set and expiry
+dates and lockout state; no password data is read. -ExportCsv writes the per-user results (only with -AuditUsers).
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+Also write a CSV of the per-user results. Only has an effect together with -AuditUsers.
+
+.PARAMETER AuditUsers
+Include the per-user password compliance audit (list of named user accounts). Without it only the policy is reported.
+
+.PARAMETER PasswordAgeWarningDays
+Users whose password expires within this many days are marked WARNING. Default 30.
+
+.PARAMETER PasswordAgeCriticalDays
+Users whose password expires within this many days are marked CRITICAL. Default 60 (should be lower than the
+warning value for sensible results; the critical check runs first).
+
+.PARAMETER IncludeDisabledUsers
+Include disabled accounts in the user audit.
+
+.EXAMPLE
+.\Get-PasswordPolicyReport.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-PasswordPolicyReport.ps1 -AuditUsers -IncludeDisabledUsers -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (RSAT ActiveDirectory module, domain-joined machine)
+Permissions:  Read-only domain user (fine-grained policy objects may need Domain Admin to read)
+When to use:  Security assessments, audit evidence for password policy, or finding accounts with expired or never-expiring passwords.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\PasswordPolicyReport_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
-
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
-
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
+    [switch]$ExportCsv,
     [switch]$AuditUsers,
-
-    [Parameter(Mandatory = $false)]
     [int]$PasswordAgeWarningDays = 30,
-
-    [Parameter(Mandatory = $false)]
     [int]$PasswordAgeCriticalDays = 60,
-
-    [Parameter(Mandatory = $false)]
     [switch]$IncludeDisabledUsers
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-PasswordPolicyReport_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-PasswordPolicyReport_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-PasswordPolicyReport_$stamp.log"
 
 Import-Module ActiveDirectory -ErrorAction Stop
 
@@ -33,22 +99,21 @@ $PolicySummary = [PSCustomObject]@{
     MaxPasswordAge            = $DefaultPolicy.MaxPasswordAge
     PasswordHistoryCount      = $DefaultPolicy.PasswordHistoryCount
     PasswordComplexity        = $DefaultPolicy.ComplexityEnabled
-    ReversibleEncryption      = $DefaultPolicy.ReversibleEncryptionEncryptionEnabled
+    ReversibleEncryption      = $DefaultPolicy.ReversibleEncryptionEnabled
     LockoutThreshold          = $DefaultPolicy.LockoutThreshold
     LockoutDuration           = $DefaultPolicy.LockoutDuration
     LockoutObservationWindow = $DefaultPolicy.LockoutObservationWindow
     FineGrainedPolicies       = ($FineGrainedPolicies | ForEach-Object { $_.Name }) -join "; "
 }
 
-Write-Host "Domain Password Policy:" -ForegroundColor Cyan
-$PolicySummary | Format-List
+Write-Log ("Domain Password Policy:" + [Environment]::NewLine + (($PolicySummary | Format-List | Out-String).TrimEnd()))
 
 $AuditUsers = if ($AuditUsers) { $true } else { $false }
 
 $UserResults = @()
 
 if ($AuditUsers) {
-    Write-Host "Auditing user password compliance..." -ForegroundColor Cyan
+    Write-Log "Auditing user password compliance..."
 
     $UserFilter = "ObjectClass -eq 'user' -and ObjectCategory -eq 'person'"
     if (-not $IncludeDisabledUsers) {
@@ -64,8 +129,9 @@ if ($AuditUsers) {
             [math]::Round(((Get-Date) - $User.PasswordLastSet).TotalDays)
         } else { $null }
 
-        $PasswordExpiryDate = if ($User.msDS-UserPasswordExpiryTimeComputed -and $User.msDS-UserPasswordExpiryTimeComputed -ne 0 -and $User.msDS-UserPasswordExpiryTimeComputed -ne 9223372036854775807) {
-            [DateTime]::FromFileTime($User.msDS-UserPasswordExpiryTimeComputed)
+        $ExpiryComputed = $User.'msDS-UserPasswordExpiryTimeComputed'
+        $PasswordExpiryDate = if ($ExpiryComputed -and $ExpiryComputed -ne 0 -and $ExpiryComputed -ne 9223372036854775807) {
+            [DateTime]::FromFileTime($ExpiryComputed)
         } elseif ($User.PasswordNeverExpires) {
             $null
         } elseif ($User.PasswordLastSet -and $DefaultPolicy.MaxPasswordAge.TotalDays -gt 0) {
@@ -102,18 +168,18 @@ if ($AuditUsers) {
         }
     }
 
-    $TotalUsers = $UserResults.Count
-    $ExpiredPasswords = ($UserResults | Where-Object { $_.PasswordStatus -eq "EXPIRED" }).Count
-    $NeverExpires = ($UserResults | Where-Object { $_.PasswordNeverExpires }).Count
-    $CriticalPasswords = ($UserResults | Where-Object { $_.PasswordStatus -eq "CRITICAL" }).Count
-    $WarningPasswords = ($UserResults | Where-Object { $_.PasswordStatus -eq "WARNING" }).Count
+    $TotalUsers = @($UserResults).Count
+    $ExpiredPasswords = @($UserResults | Where-Object { $_.PasswordStatus -eq "EXPIRED" }).Count
+    $NeverExpires = @($UserResults | Where-Object { $_.PasswordNeverExpires }).Count
+    $CriticalPasswords = @($UserResults | Where-Object { $_.PasswordStatus -eq "CRITICAL" }).Count
+    $WarningPasswords = @($UserResults | Where-Object { $_.PasswordStatus -eq "WARNING" }).Count
 
-    Write-Host "Audited $TotalUsers users" -ForegroundColor Green
-    Write-Host "  Password OK: $($TotalUsers - $ExpiredPasswords - $NeverExpires - $CriticalPasswords - $WarningPasswords)" -ForegroundColor Green
-    Write-Host "  Warning: $WarningPasswords" -ForegroundColor Yellow
-    Write-Host "  Critical: $CriticalPasswords" -ForegroundColor Yellow
-    Write-Host "  Expired: $ExpiredPasswords" -ForegroundColor Red
-    Write-Host "  Never Expires: $NeverExpires" -ForegroundColor Red
+    Write-Log "Audited $TotalUsers users"
+    Write-Log "  Password OK: $($TotalUsers - $ExpiredPasswords - $NeverExpires - $CriticalPasswords - $WarningPasswords)"
+    Write-Log "  Warning: $WarningPasswords"
+    Write-Log "  Critical: $CriticalPasswords"
+    Write-Log "  Expired: $ExpiredPasswords" 'WARN'
+    Write-Log "  Never Expires: $NeverExpires" 'WARN'
 }
 
 $HtmlPolicyRows = @"
@@ -206,10 +272,13 @@ $($HtmlUserRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "Report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "Report: $htmlPath"
 
-if ($CsvPath -and $AuditUsers) {
-    $UserResults | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV: $CsvPath" -ForegroundColor Green
+if ($ExportCsv -and $AuditUsers) {
+    $UserResults | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV: $csvPath"
+}
+elseif ($ExportCsv) {
+    Write-Log "-ExportCsv has no effect without -AuditUsers; no CSV written." 'WARN'
 }

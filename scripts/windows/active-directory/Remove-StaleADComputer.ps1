@@ -1,22 +1,87 @@
+#Requires -Version 5.1
+#Requires -Modules ActiveDirectory
+
+<#
+.SYNOPSIS
+Finds Windows computer accounts that have not logged on recently and optionally disables or deletes them.
+
+.DESCRIPTION
+Queries Active Directory for Windows computer accounts whose LastLogonDate is older than -InactiveDays and writes
+an HTML report listing each stale computer with its OS, enabled state, last logon, days inactive, password last set,
+creation date and the action taken. By default nothing is changed (report only). -DisableComputers disables
+enabled stale accounts; -DeleteComputers deletes stale accounts that are already disabled. Both honor -WhatIf and
+-Confirm, so a dry run shows the planned action ("Disable"/"Delete") in the report without touching AD.
+Recommended order: run report-only, run with -DisableComputers, wait a retention period, then run with -DeleteComputers.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER InactiveDays
+Computers with no logon for at least this many days are considered stale. Default 90.
+
+.PARAMETER OuPath
+Optional distinguished name of an OU to limit the search to.
+
+.PARAMETER DisableComputers
+Disable stale computer accounts that are currently enabled. Supports -WhatIf.
+
+.PARAMETER DeleteComputers
+Delete stale computer accounts that are already disabled. Supports -WhatIf. Deletion is permanent unless the AD Recycle Bin is enabled.
+
+.EXAMPLE
+.\Remove-StaleADComputer.ps1 -InactiveDays 120 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Remove-StaleADComputer.ps1 -InactiveDays 90 -OuPath "OU=Workstations,DC=contoso,DC=com" -DisableComputers -WhatIf -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (RSAT ActiveDirectory module, domain-joined machine)
+Permissions:  Read-only domain user for the report; rights to disable/delete computer objects (e.g. Domain Admin or delegated Account Operator) for -DisableComputers / -DeleteComputers
+When to use:  Periodic AD hygiene, after decommissioning projects, or before a domain audit to clear out dead computer objects.
+Safety:       Destructive (supports -WhatIf)
+Version:      1.0
+#>
+[CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
     [int]$InactiveDays = 90,
-
-    [Parameter(Mandatory = $false)]
     [string]$OuPath,
-
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\AD_StaleComputers.html",
-
-    [Parameter(Mandatory = $false)]
     [switch]$DisableComputers,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$DeleteComputers,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$WhatIf
+    [switch]$DeleteComputers
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line -WhatIf:$false }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+# Report folder, report and log are always written, even under -WhatIf (WhatIf only guards the state changes below).
+$WhatIfSaved = $WhatIfPreference
+$WhatIfPreference = $false
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$WhatIfPreference = $WhatIfSaved
+$htmlPath = Join-Path $outDir "Remove-StaleADComputer_$stamp.html"
+$script:LogFile = Join-Path $outDir "Remove-StaleADComputer_$stamp.log"
 
 Import-Module ActiveDirectory -ErrorAction Stop
 
@@ -32,29 +97,32 @@ if ($OuPath) {
     $queryParams.SearchBase = $OuPath
 }
 
-$StaleComputers = Get-ADComputer @queryParams | Sort-Object LastLogonDate
+$StaleComputers = @(Get-ADComputer @queryParams | Sort-Object LastLogonDate)
+Write-Log "Found $($StaleComputers.Count) computer(s) inactive since $CutoffDate."
 
-$Results = foreach ($Computer in $StaleComputers) {
+$Results = @(foreach ($Computer in $StaleComputers) {
     $Action = "None"
 
     if ($DeleteComputers -and $Computer.Enabled -eq $false) {
         $Action = "Delete"
-        if (-not $WhatIf) {
+        if ($PSCmdlet.ShouldProcess($Computer.DistinguishedName, 'Delete computer account')) {
             try {
                 Remove-ADComputer -Identity $Computer.DistinguishedName -Confirm:$false
                 $Action = "Deleted"
             } catch {
                 $Action = "DeleteFailed"
+                Write-Log "Delete failed for $($Computer.Name): $($_.Exception.Message)" 'ERROR'
             }
         }
     } elseif ($DisableComputers -and $Computer.Enabled) {
         $Action = "Disable"
-        if (-not $WhatIf) {
+        if ($PSCmdlet.ShouldProcess($Computer.DistinguishedName, 'Disable computer account')) {
             try {
                 Disable-ADAccount -Identity $Computer.DistinguishedName -Confirm:$false
                 $Action = "Disabled"
             } catch {
                 $Action = "DisableFailed"
+                Write-Log "Disable failed for $($Computer.Name): $($_.Exception.Message)" 'ERROR'
             }
         }
     }
@@ -70,11 +138,11 @@ $Results = foreach ($Computer in $StaleComputers) {
         DistinguishedName  = $Computer.DistinguishedName
         Action             = $Action
     }
-}
+})
 
-$TotalStale = ($Results | Where-Object { $_.DaysSinceLogon -ge $InactiveDays }).Count
-$TotalDisabled = ($Results | Where-Object { $_.Action -eq "Disabled" }).Count
-$TotalDeleted = ($Results | Where-Object { $_.Action -eq "Deleted" }).Count
+$TotalStale = @($Results | Where-Object { $_.DaysSinceLogon -ge $InactiveDays }).Count
+$TotalDisabled = @($Results | Where-Object { $_.Action -eq "Disabled" }).Count
+$TotalDeleted = @($Results | Where-Object { $_.Action -eq "Deleted" }).Count
 
 $HtmlBody = $Results | Where-Object { $_.DaysSinceLogon -ge $InactiveDays } | ForEach-Object {
     $RowColor = switch ($_.Action) {
@@ -115,7 +183,7 @@ tr:hover { background: #f5f5f5; }
     <strong>Parameters:</strong> Inactive Days: $InactiveDays |
     Disable: $($DisableComputers.IsPresent) |
     Delete: $($DeleteComputers.IsPresent) |
-    WhatIf: $($WhatIf.IsPresent)<br>
+    WhatIf: $WhatIfPreference<br>
     <strong>Total Stale Computers:</strong> $TotalStale<br>
     <strong>Disabled:</strong> $TotalDisabled |
     <strong>Deleted:</strong> $TotalDeleted
@@ -130,7 +198,7 @@ $($HtmlBody -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8 -WhatIf:$false
 
-Write-Host "Report generated: $ReportPath" -ForegroundColor Green
-Write-Host "Summary: $TotalStale stale computers | Disabled: $TotalDisabled | Deleted: $TotalDeleted" -ForegroundColor Cyan
+Write-Log "Report generated: $htmlPath"
+Write-Log "Summary: $TotalStale stale computers | Disabled: $TotalDisabled | Deleted: $TotalDeleted"

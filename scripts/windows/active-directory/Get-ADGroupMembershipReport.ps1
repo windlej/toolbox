@@ -1,25 +1,90 @@
+#Requires -Version 5.1
+#Requires -Modules ActiveDirectory
+
+<#
+.SYNOPSIS
+Audits Active Directory group membership and writes an HTML report (optional CSV).
+
+.DESCRIPTION
+For each group named in -GroupNames (or every group matching -GroupNameFilter) lists the members with their type,
+name, SamAccountName, enabled state, title, department, last logon and manager (users only). Disabled users and
+distribution groups are skipped unless requested, and -Recursive expands nested groups. The HTML report has one
+row per group member; -ExportCsv adds a CSV with the same data plus group category, scope, last logon and manager.
+
+.PARAMETER OutputPath
+Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER GroupNames
+Optional. Names of the groups to audit. If omitted, groups are selected with -GroupNameFilter.
+
+.PARAMETER GroupNameFilter
+Wildcard (-like) filter on group Name used when -GroupNames is not given. Default '*' (all groups).
+
+.PARAMETER ExportCsv
+Also write a CSV next to the HTML report.
+
+.PARAMETER Recursive
+Expand nested group membership.
+
+.PARAMETER IncludeDisabledUsers
+Include disabled user accounts (skipped by default).
+
+.PARAMETER IncludeDistributionGroups
+Include distribution groups (skipped by default; only security groups are audited).
+
+.EXAMPLE
+.\Get-ADGroupMembershipReport.ps1 -GroupNames 'Domain Admins','Server Operators' -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-ADGroupMembershipReport.ps1 -GroupNameFilter 'SG-*' -Recursive -IncludeDisabledUsers -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+
+.NOTES
+Platform:     Windows (RSAT ActiveDirectory module, domain-joined machine)
+Permissions:  Read-only domain user (standard users can read group membership)
+When to use:  Access reviews, audits of who is in which security group, or before cleaning up groups.
+Safety:       Read-only
+Version:      1.0
+#>
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $false)]
+    [string]$OutputPath,
+    [string]$CustomerName,
     [string[]]$GroupNames,
-
-    [Parameter(Mandatory = $false)]
     [string]$GroupNameFilter = "*",
-
-    [Parameter(Mandatory = $false)]
-    [string]$ReportPath = ".\GroupMembershipAudit_$(Get-Date -Format 'yyyyMMdd_HHmmss').html",
-
-    [Parameter(Mandatory = $false)]
-    [string]$CsvPath,
-
-    [Parameter(Mandatory = $false)]
+    [switch]$ExportCsv,
     [switch]$Recursive,
-
-    [Parameter(Mandatory = $false)]
     [switch]$IncludeDisabledUsers,
-
-    [Parameter(Mandatory = $false)]
     [switch]$IncludeDistributionGroups
 )
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir   = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$htmlPath = Join-Path $outDir "Get-ADGroupMembershipReport_$stamp.html"
+$csvPath  = Join-Path $outDir "Get-ADGroupMembershipReport_$stamp.csv"
+$script:LogFile = Join-Path $outDir "Get-ADGroupMembershipReport_$stamp.log"
 
 Import-Module ActiveDirectory -ErrorAction Stop
 
@@ -32,7 +97,7 @@ function Get-GroupMembershipDetail {
     try {
         $Group = Get-ADGroup -Identity $GroupName -Properties Description, GroupCategory, GroupScope, Created, DistinguishedName
     } catch {
-        Write-Warning "Group not found: $GroupName"
+        Write-Log "Group not found: $GroupName" 'WARN'
         return $null
     }
 
@@ -120,7 +185,7 @@ if ($GroupNames) {
 }
 
 $AuditResults = foreach ($GroupName in $TargetGroups) {
-    Write-Host "Processing group: $GroupName" -ForegroundColor Yellow
+    Write-Log "Processing group: $GroupName"
     $Result = Get-GroupMembershipDetail -GroupName $GroupName -Recurse $Recursive
     if ($Result) {
         [PSCustomObject]@{
@@ -135,7 +200,7 @@ $AuditResults = foreach ($GroupName in $TargetGroups) {
     }
 }
 
-Write-Host "Audited $($AuditResults.Count) groups" -ForegroundColor Green
+Write-Log "Audited $(@($AuditResults).Count) groups"
 
 $HtmlRows = foreach ($Group in $AuditResults) {
     $MemberRows = foreach ($Member in $Group.Members) {
@@ -170,7 +235,7 @@ tr:hover { background: #f5f5f5; }
 <body>
 <h1>Active Directory Group Membership Audit</h1>
 <div class='summary'>
-    <strong>Groups Audited:</strong> $($AuditResults.Count) |
+    <strong>Groups Audited:</strong> $(@($AuditResults).Count) |
     <strong>Recursive:</strong> $Recursive |
     <strong>Generated:</strong> $(Get-Date -Format 'yyyy-MM-dd HH:mm')
 </div>
@@ -184,10 +249,10 @@ $($HtmlRows -join "`n")
 </body></html>
 "@
 
-$Html | Out-File -FilePath $ReportPath -Encoding UTF8
-Write-Host "HTML report: $ReportPath" -ForegroundColor Green
+$Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
+Write-Log "HTML report: $htmlPath"
 
-if ($CsvPath) {
+if ($ExportCsv) {
     $CsvData = foreach ($Group in $AuditResults) {
         foreach ($Member in $Group.Members) {
             [PSCustomObject]@{
@@ -205,6 +270,6 @@ if ($CsvPath) {
             }
         }
     }
-    $CsvData | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
-    Write-Host "CSV export: $CsvPath" -ForegroundColor Green
+    $CsvData | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+    Write-Log "CSV export: $csvPath"
 }
