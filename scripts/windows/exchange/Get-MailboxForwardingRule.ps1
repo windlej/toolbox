@@ -32,10 +32,12 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 Also write the findings to a CSV next to the HTML report.
 
 .PARAMETER DetectMailboxForwarding
-Check the ForwardingAddress / ForwardingSmtpAddress properties on each mailbox.
+Check the ForwardingAddress / ForwardingSmtpAddress properties on each mailbox. If neither this nor
+-DetectInboxRuleForwarding is given, both checks run.
 
 .PARAMETER DetectInboxRuleForwarding
-Check each mailbox's inbox rules for ForwardTo / RedirectTo actions.
+Check each mailbox's inbox rules for ForwardTo / RedirectTo actions. If neither this nor
+-DetectMailboxForwarding is given, both checks run.
 
 .PARAMETER RemoveForwarding
 Clear detected mailbox forwarding and disable detected inbox rules. Supports -WhatIf and -Confirm.
@@ -54,7 +56,7 @@ Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
 Permissions:  Exchange Online roles View-Only Recipients (report); Mail Recipients (to use -RemoveForwarding)
 When to use:  After a suspected account compromise, during a security review, or before offboarding to find mail leaving the tenant.
 Safety:       Changes data (supports -WhatIf)
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -225,6 +227,11 @@ function Remove-InboxRuleForwarding {
 # ── MAIN ──
 try {
     Write-Log 'Forwarding rule detection started.'
+    if (-not $DetectMailboxForwarding -and -not $DetectInboxRuleForwarding) {
+        $DetectMailboxForwarding   = $true
+        $DetectInboxRuleForwarding = $true
+        Write-Log 'Neither -DetectMailboxForwarding nor -DetectInboxRuleForwarding was given; checking both.' 'WARN'
+    }
     $scope = @()
     if ($DetectMailboxForwarding)   { $scope += 'Mailbox forwarding' }
     if ($DetectInboxRuleForwarding) { $scope += 'Inbox rules' }
