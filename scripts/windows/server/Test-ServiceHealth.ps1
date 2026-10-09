@@ -9,9 +9,7 @@ For each computer, looks up each service in -ServiceNames and classifies it: Hea
 (stopped but set to start automatically), Stopped (stopped, manual or disabled), Degraded (any other state,
 for example starting or stopping) or Unknown (service not found). The default list covers common infrastructure
 services (IIS, SQL Server, DNS, AD DS, DHCP, file sharing, WinRM and others). Output is an HTML report with a
-summary header, an optional CSV and a log file. If -AlertEmailTo is given and any service is Critical, an
-email is sent from -From through -SmtpServer; nothing else is changed (the script stops at start-up if
--AlertEmailTo is given without -From). Services are read with CIM (Win32_Service), which works in Windows
+summary header, an optional CSV and a log file; nothing is changed. Services are read with CIM (Win32_Service), which works in Windows
 PowerShell 5.1 and PowerShell 7; the local computer is queried directly and remote ones over WinRM.
 
 .PARAMETER ComputerName
@@ -30,15 +28,6 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 .PARAMETER ExportCsv
 Also write a CSV of the results next to the HTML report.
 
-.PARAMETER AlertEmailTo
-Optional recipients for an alert email when any service is Critical. No email is sent when omitted. Requires -From.
-
-.PARAMETER From
-Sender address for the alert email (for example alerts@contoso.com). Required with -AlertEmailTo.
-
-.PARAMETER SmtpServer
-SMTP server used for the alert email. Default: localhost.
-
 .PARAMETER ShowAllServices
 Report every service found on each computer instead of only the ones in -ServiceNames. Each is classified the
 same way (so stopped automatic services are still Critical).
@@ -47,7 +36,7 @@ same way (so stopped automatic services are still Critical).
 .\Test-ServiceHealth.ps1 -OutputPath D:\Reports
 
 .EXAMPLE
-.\Test-ServiceHealth.ps1 -ComputerName SRV01,SRV02 -ServiceNames W3SVC,MSSQLSERVER -AlertEmailTo it@contoso.com -From alerts@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+.\Test-ServiceHealth.ps1 -ComputerName SRV01,SRV02 -ServiceNames W3SVC,MSSQLSERVER -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
 
 .NOTES
 Platform:     Windows (Windows PowerShell 5.1 or PowerShell 7; CIM over WinRM to remote targets)
@@ -79,24 +68,11 @@ param(
     [switch]$ExportCsv,
 
     [Parameter(Mandatory = $false)]
-    [string[]]$AlertEmailTo,
-
-    [Parameter(Mandatory = $false)]
-    [string]$From,
-
-    [Parameter(Mandatory = $false)]
-    [string]$SmtpServer = "localhost",
-
-    [Parameter(Mandatory = $false)]
     [switch]$ShowAllServices
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-if ($AlertEmailTo -and -not $From) {
-    throw '-AlertEmailTo requires -From.'
-}
 
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
@@ -258,19 +234,4 @@ Write-Log "Report written: $htmlPath"
 if ($ExportCsv) {
     $AllResults | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
     Write-Log "CSV written: $csvPath"
-}
-
-if ($AlertEmailTo -and $CriticalServices.Count -gt 0) {
-    try {
-        $Body = "Critical Service Alert - $(Get-Date -Format 'yyyy-MM-dd HH:mm')`n`n"
-        $Body += ($CriticalServices | ForEach-Object {
-            "CRITICAL: $($_.ComputerName) - $($_.ServiceName) ($($_.DisplayName)) is $($_.Status)"
-        }) -join "`n"
-        Send-MailMessage -To $AlertEmailTo -From $From `
-            -Subject "[SERVICE ALERT] $($CriticalServices.Count) critical services" -Body $Body `
-            -SmtpServer $SmtpServer -ErrorAction Stop
-        Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
-    } catch {
-        Write-Log "Failed to send alert: $($_.Exception.Message)" 'WARN'
-    }
 }
