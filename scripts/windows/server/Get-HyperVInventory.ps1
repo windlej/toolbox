@@ -117,10 +117,7 @@ function Get-VMDetail {
 
     $Results = foreach ($VM in $VMs) {
         $MemoryGB = [math]::Round($VM.MemoryStartup / 1GB, 2)
-        $Uptime = if ($VM.State -eq "Running") {
-            (Get-Date) - $VM.Uptime.Ticks
-            $VM.Uptime
-        } else { $null }
+        $Uptime = if ($VM.State -eq "Running") { $VM.Uptime } else { $null }
 
         $UptimeStr = if ($Uptime) {
             "$($Uptime.Days)d $($Uptime.Hours)h $($Uptime.Minutes)m"
