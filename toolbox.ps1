@@ -713,7 +713,7 @@ function Read-ParameterValue {
 
     if ($Param.Type -eq "switch" -or $Param.Type -eq "SwitchParameter") {
         $Default = $false
-        if ($DefaultStr -match "true|yes|\$true") { $Default = $true }
+        if ($DefaultStr -match '^(true|yes|\$true)$') { $Default = $true }
         $Result = Show-YesNo -Prompt "  $Label" -Default $Default
         return $Result
     }
