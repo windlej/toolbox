@@ -13,7 +13,8 @@
     to the output folder. A log file is always written to the output folder.
 
 .PARAMETER ComputerName
-    One or more target machine names. Defaults to the local machine.
+    One or more target machine names. Defaults to the local machine. Local aliases (the short name, the
+    local FQDN, 'localhost', '.', 127.0.0.1) are treated as the local machine and queried without a remote call.
 
 .PARAMETER HoursBack
     How many hours back to search. Default is 24.
@@ -264,6 +265,27 @@ function Invoke-SafeMessage {
 # REGION: CORE COLLECTION FUNCTION
 # ─────────────────────────────────────────────────────────────────────────────
 
+function Test-LocalComputer {
+    <#
+    .SYNOPSIS
+        Returns $true when a target name refers to this machine (short name, FQDN, localhost, '.', loopback).
+    #>
+    param([string] $Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+
+    $aliases = @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1', '::1')
+    try {
+        $aliases += [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+    } catch {
+        Write-Verbose "Could not resolve the local FQDN: $($_.Exception.Message)"
+    }
+
+    $target = $Name.Trim()
+    if ($target.Length -gt 1) { $target = $target.TrimEnd('.') }
+    return ($aliases -contains $target)
+}
+
 function Get-CriticalEvents {
     <#
     .SYNOPSIS
@@ -292,7 +314,7 @@ function Get-CriticalEvents {
         }
 
         # Add -ComputerName only for remote targets to avoid local permission quirks
-        if ($TargetComputer -ne $env:COMPUTERNAME) {
+        if (-not (Test-LocalComputer -Name $TargetComputer)) {
             $queryParams['ComputerName'] = $TargetComputer
         }
 
