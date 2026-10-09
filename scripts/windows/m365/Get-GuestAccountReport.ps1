@@ -6,8 +6,7 @@
 Audits Entra ID (Azure AD) guest accounts and optionally blocks or removes stale ones.
 
 .DESCRIPTION
-Retrieves every guest user (userType eq 'Guest') with sign-in activity, invitation details and group
-membership, and flags guests whose last sign-in is older than the stale threshold (or who never signed in).
+Retrieves every guest user (userType eq 'Guest') with sign-in activity and group membership, and flags guests whose last sign-in is older than the stale threshold (or who never signed in).
 By default the script is read-only. With -BlockSignInForStale it disables stale guest accounts; with
 -RemoveStaleGuests it deletes them (removal takes precedence when both are given). Both actions honour
 -WhatIf and -Confirm. Output is an HTML report (primary) with a summary and one row per guest, plus an
@@ -45,7 +44,7 @@ Platform:     Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK)
 Permissions:  Graph scopes User.Read.All, AuditLog.Read.All, Directory.Read.All; User.ReadWrite.All when -RemoveStaleGuests or -BlockSignInForStale is used (Global Administrator or User Administrator)
 When to use:  Quarterly external-access review, or before cleaning up guests left behind by finished projects.
 Safety:       Destructive (supports -WhatIf)
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -108,27 +107,6 @@ function Connect-ToGraph {
     }
 }
 
-function Get-InvitationDetails {
-    $DetailMap = @{}
-    try {
-        $Invitations = @(Get-MgInvitation -All -ErrorAction Stop)
-    } catch {
-        Write-Log "Could not retrieve invitation details (continuing without them): $_" 'WARN'
-        return $DetailMap
-    }
-
-    foreach ($Invite in $Invitations) {
-        if (-not $Invite.InvitedUserEmailAddress) { continue }
-        $DetailMap[$Invite.InvitedUserEmailAddress] = @{
-            InvitedByEmail  = $Invite.InvitedByEmailAddress
-            InviteRedeemUrl = $Invite.InviteRedeemUrl
-            InviteSentDate  = $Invite.InvitedDateTime
-            InviteStatus    = $Invite.InviteStatus
-        }
-    }
-    return $DetailMap
-}
-
 function Get-GuestGroupMembership {
     param([string]$UserId)
 
@@ -144,7 +122,6 @@ function Get-GuestGroupMembership {
 function Get-GuestDetail {
     param(
         [PSObject]$Guest,
-        [hashtable]$InviteMap,
         [int]$StaleDays
     )
 
@@ -154,14 +131,6 @@ function Get-GuestDetail {
     } else { $null }
 
     $IsStale = (-not $LastSignIn) -or ($DaysSinceSignIn -ge $StaleDays)
-
-    $InviteInfo = $null
-    if ($Guest.Mail -and $InviteMap.ContainsKey($Guest.Mail)) {
-        $InviteInfo = $InviteMap[$Guest.Mail]
-    } elseif ($Guest.UserPrincipalName -and $InviteMap.ContainsKey($Guest.UserPrincipalName)) {
-        $InviteInfo = $InviteMap[$Guest.UserPrincipalName]
-    }
-    if (-not $InviteInfo) { $InviteInfo = @{} }
 
     $GroupMembership = Get-GuestGroupMembership -UserId $Guest.Id
 
@@ -173,9 +142,6 @@ function Get-GuestDetail {
         CreatedDateTime    = $Guest.CreatedDateTime
         LastSignInDateTime = $LastSignIn
         DaysSinceSignIn    = $DaysSinceSignIn
-        InvitedBy          = $InviteInfo.InvitedByEmail
-        InviteSentDate     = $InviteInfo.InviteSentDate
-        InviteStatus       = $InviteInfo.InviteStatus
         GroupMembership    = $GroupMembership
         Department         = $Guest.Department
         IsStale            = $IsStale
@@ -195,10 +161,6 @@ try {
         Connect-ToGraph
     }
 
-    Write-Log 'Retrieving invitation details...'
-    $InviteMap = Get-InvitationDetails
-    Write-Log "Found $(@($InviteMap.Keys).Count) invitations"
-
     Write-Log 'Retrieving guest users...'
     $Guests = @(Get-MgUser -All -Filter "userType eq 'Guest'" -Property Id, DisplayName,
         UserPrincipalName, Mail, AccountEnabled, CreatedDateTime, SignInActivity,
@@ -207,7 +169,7 @@ try {
 
     Write-Log 'Analyzing guests...'
     foreach ($Guest in $Guests) {
-        $Results.Add((Get-GuestDetail -Guest $Guest -InviteMap $InviteMap -StaleDays $StaleGuestDays))
+        $Results.Add((Get-GuestDetail -Guest $Guest -StaleDays $StaleGuestDays))
     }
 
     if ($RemoveStaleGuests -or $BlockSignInForStale) {
@@ -270,7 +232,6 @@ try {
         <td>$($_.CreatedDateTime)</td>
         <td>$($_.LastSignInDateTime)</td>
         <td>$($_.DaysSinceSignIn)</td>
-        <td>$($_.InvitedBy)</td>
         <td>$($_.GroupMembership)</td>
         <td>$($_.Action)</td>
     </tr>"
@@ -301,7 +262,7 @@ td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
     <strong>Threshold:</strong> $StaleGuestDays days
 </div>
 <table>
-<tr><th>UPN</th><th>Name</th><th>Mail</th><th>Enabled</th><th>Created</th><th>Last Sign-In</th><th>Days</th><th>Invited By</th><th>Groups</th><th>Action</th></tr>
+<tr><th>UPN</th><th>Name</th><th>Mail</th><th>Enabled</th><th>Created</th><th>Last Sign-In</th><th>Days</th><th>Groups</th><th>Action</th></tr>
 $($HtmlRows -join "`n")
 </table>
 </body></html>
