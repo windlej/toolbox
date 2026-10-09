@@ -8,8 +8,10 @@ Reports privileged Azure RBAC role assignments (Owner, Contributor, User Access 
 .DESCRIPTION
 For each accessible subscription (or the ones you list) the script reads role assignments at the subscription
 scope and at every resource group scope, and keeps the ones whose role is in the privileged role list.
-Each result row records the principal (display name, sign-in name, object type), role, scope and whether the
-principal is a service principal.
+Each result row records the principal (display name, sign-in name, object type), role, the assignment's own scope
+(with ScopeType and ScopeName: ManagementGroup, Subscription, ResourceGroup or Resource) and whether the principal
+is a service principal. A scope query also returns inherited and descendant assignments, so each role assignment
+is reported once, no matter how many queries returned it.
 
 Output is an HTML report (primary) with Owner / Contributor / user / service principal counts and one row per
 assignment, plus an optional CSV. The script makes no changes to Azure.
@@ -43,7 +45,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources modules
 Permissions:  Azure RBAC Reader on each subscription (needs Microsoft.Authorization/roleAssignments/read); Entra directory read to resolve principal names
 When to use:  Access review of a customer subscription, before removing standing Owner rights, or to list who can grant access.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -86,6 +88,8 @@ $csvPath  = Join-Path $outDir "Get-AzureRbacReport_$stamp.csv"
 $script:LogFile = Join-Path $outDir "Get-AzureRbacReport_$stamp.log"
 
 $Results = [System.Collections.Generic.List[PSObject]]::new()
+$script:SeenAssignments = [System.Collections.Generic.HashSet[string]]::new()
+$script:CurrentSubscriptionId = ''
 
 function Connect-ToAzure {
     try {
@@ -103,6 +107,7 @@ function Get-RoleAssignmentsRecursive {
         [string]$SubscriptionName
     )
 
+    $SubscriptionScope = "/subscriptions/$($script:CurrentSubscriptionId)"
     $Assignments = $null
     try {
         $Assignments = Get-AzRoleAssignment -Scope $Scope -ErrorAction Stop
@@ -113,12 +118,36 @@ function Get-RoleAssignmentsRecursive {
 
     foreach ($Assignment in $Assignments) {
         if ($Assignment.RoleDefinitionName -in $PrivilegedRoles) {
-            $ScopeType = "Subscription"
-            $ScopeName = $SubscriptionName
+            # The scope query also returns inherited and descendant assignments, so use each assignment's own scope
+            # and skip any assignment already recorded by an earlier query.
+            $AssignmentScope = [string]$Assignment.Scope
+            $DedupeKey = if ($Assignment.RoleAssignmentId) { [string]$Assignment.RoleAssignmentId }
+            else { '{0}|{1}|{2}' -f $AssignmentScope, $Assignment.ObjectId, $Assignment.RoleDefinitionId }
+            if (-not $script:SeenAssignments.Add($DedupeKey.ToLowerInvariant())) { continue }
+
+            if ($AssignmentScope -match '^/providers/Microsoft\.Management/managementGroups/([^/]+)$') {
+                $ScopeType = 'ManagementGroup'
+                $ScopeName = $Matches[1]
+            } elseif ($AssignmentScope -match '^/subscriptions/([^/]+)$') {
+                $ScopeType = 'Subscription'
+                $ScopeName = if ($AssignmentScope -eq $SubscriptionScope) { $SubscriptionName } else { $Matches[1] }
+            } elseif ($AssignmentScope -match '^/subscriptions/[^/]+/resourceGroups/([^/]+)$') {
+                $ScopeType = 'ResourceGroup'
+                $ScopeName = $Matches[1]
+            } elseif ($AssignmentScope -match '^/subscriptions/[^/]+/resourceGroups/[^/]+/.+/([^/]+)$') {
+                $ScopeType = 'Resource'
+                $ScopeName = $Matches[1]
+            } elseif ($AssignmentScope -eq '/') {
+                $ScopeType = 'Root'
+                $ScopeName = '/'
+            } else {
+                $ScopeType = 'Other'
+                $ScopeName = $AssignmentScope
+            }
 
             $Found += [PSCustomObject]@{
                 SubscriptionName  = $SubscriptionName
-                Scope             = $Scope
+                Scope             = $AssignmentScope
                 ScopeType         = $ScopeType
                 ScopeName         = $ScopeName
                 DisplayName       = $Assignment.DisplayName
@@ -158,6 +187,7 @@ foreach ($SubId in $SubscriptionIds) {
         continue
     }
 
+    $script:CurrentSubscriptionId = $SubId
     Write-Log "Auditing: $SubName"
 
     foreach ($Item in @(Get-RoleAssignmentsRecursive -Scope "/subscriptions/$SubId" -SubscriptionName $SubName)) {
@@ -177,7 +207,7 @@ foreach ($SubId in $SubscriptionIds) {
         }
 
         if ($RGAssignments.Count -gt 0) {
-            Write-Log "  Found $($RGAssignments.Count) privileged assignments in RG: $($RG.ResourceGroupName)"
+            Write-Log "  Found $($RGAssignments.Count) new privileged assignments in RG: $($RG.ResourceGroupName)"
         }
     }
 }
@@ -200,6 +230,8 @@ $HtmlRows = $Results | Sort-Object RoleDefinitionName, DisplayName | ForEach-Obj
         <td>$($_.SignInName)</td>
         <td>$($_.ObjectType)</td>
         <td>$($_.RoleDefinitionName)</td>
+        <td>$($_.ScopeType)</td>
+        <td>$($_.ScopeName)</td>
         <td>$($_.Scope)</td>
     </tr>"
 }
@@ -228,7 +260,7 @@ td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
     <strong>Service Principals:</strong> $SPCount
 </div>
 <table>
-<tr><th>Subscription</th><th>Name</th><th>UPN</th><th>Type</th><th>Role</th><th>Scope</th></tr>
+<tr><th>Subscription</th><th>Name</th><th>UPN</th><th>Type</th><th>Role</th><th>Scope type</th><th>Scope name</th><th>Scope</th></tr>
 $($HtmlRows -join "`n")
 </table>
 </body></html>
