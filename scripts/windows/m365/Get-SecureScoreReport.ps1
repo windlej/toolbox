@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-#Requires -Modules Microsoft.Graph.Authentication
+#Requires -Modules Microsoft.Graph.Authentication, Microsoft.Graph.Identity.DirectoryManagement
 
 <#
 .SYNOPSIS
@@ -7,7 +7,7 @@ Reports the tenant's current Microsoft Secure Score, optionally with a per-contr
 
 .DESCRIPTION
 Reads the latest Microsoft Secure Score from the Microsoft Graph (beta) security API and writes an HTML
-report with the current and maximum score and percentage. With -IncludeControlScores it also reads the
+report with the tenant name, the current and maximum score and percentage. With -IncludeControlScores it also reads the
 Secure Score control profiles, calculates the percentage achieved per control, averages them per category,
 and lists the 50 lowest-scoring controls with their state and tier. An optional CSV contains the per-control
 data (only available with -IncludeControlScores). This script is read-only. If no score data is returned,
@@ -36,10 +36,10 @@ Skip Connect-MgGraph (use when a Graph session with suitable scopes already exis
 
 .NOTES
 Platform:     Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK)
-Permissions:  Graph scope SecurityEvents.Read.All (Security Reader or Global Reader)
+Permissions:  Graph scopes SecurityEvents.Read.All, Organization.Read.All (Security Reader or Global Reader)
 When to use:  Security posture review, baseline before a hardening project, or quarterly progress reporting.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -84,7 +84,7 @@ $ControlResults = @()
 $AvgCategory = @()
 
 function Connect-ToGraph {
-    $scopes = @('SecurityEvents.Read.All')
+    $scopes = @('SecurityEvents.Read.All', 'Organization.Read.All')
     try {
         Connect-MgGraph -Scopes $scopes -NoWelcome -ErrorAction Stop
         Write-Log 'Connected to Graph'
@@ -123,6 +123,14 @@ try {
     }
 
     $LatestScore = $ScoreData[0]
+
+    $TenantName = 'Unknown'
+    try {
+        $Org = @(Get-MgOrganization -ErrorAction Stop)
+        if ($Org.Count -gt 0 -and $Org[0].DisplayName) { $TenantName = $Org[0].DisplayName }
+    } catch {
+        Write-Log "Could not read the tenant name: $_" 'WARN'
+    }
 
     $CurrentScore = $LatestScore.currentScore
     $MaxScore = $LatestScore.maxScore
@@ -238,7 +246,7 @@ td { padding: 5px 8px; border-bottom: 1px solid #ddd; }
 </div>
 <div class='summary'>
     <strong>Licensed Users:</strong> $($LatestScore.licensedUsers) |
-    <strong>Tenant:</strong> $($LatestScore.vendorInformation.vendorName) |
+    <strong>Tenant:</strong> $TenantName |
     <strong>Score Date:</strong> $($LatestScore.createdDateTime)
 </div>
 
