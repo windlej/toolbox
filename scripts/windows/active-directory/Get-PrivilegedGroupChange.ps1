@@ -11,14 +11,16 @@ Schema Admins, Administrators and others by default) and writes an HTML report w
 title, department, password and logon dates, flagging disabled accounts and accounts whose password never expires.
 -UpdateBaseline saves the current membership to a baseline XML file; -CompareWithBaseline loads that file and
 lists members who were Added or Removed since it was taken. -AlertEmailTo sends the change list by e-mail
-(Send-MailMessage). Active Directory is never modified; the only things written are the report, the log and,
-with -UpdateBaseline, the baseline file.
+through the SMTP server given in -SmtpServer, from the address in -From; no alert is sent unless -AlertEmailTo,
+-From and -SmtpServer are all provided (the script stops at start-up if -AlertEmailTo is given without the other two).
+Active Directory is never modified; the only things written are the report, the log and, with -UpdateBaseline,
+the baseline file.
 
 The baseline is persistent state with a fixed file name (Get-PrivilegedGroupChange_Baseline.xml) inside the
 resolved output folder. To compare against an earlier baseline you MUST reuse the same -OutputPath and
 -CustomerName on every run (or pass the same explicit -BaselinePath). Typical routine: run once with
--UpdateBaseline, then run on a schedule with -CompareWithBaseline. Note that using both switches in one run
-saves the new baseline first, so the comparison will then show no changes.
+-UpdateBaseline, then run on a schedule with -CompareWithBaseline. Using both switches in one run compares
+against the existing baseline first and only then saves the current membership as the new baseline.
 
 .PARAMETER OutputPath
 Folder for the report, log and default baseline file. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
@@ -35,15 +37,20 @@ Optional full path to the baseline XML file. Default is <output folder>\Get-Priv
 
 .PARAMETER UpdateBaseline
 Save the current membership as the baseline (overwrites the existing baseline file). Supports -WhatIf.
+When combined with -CompareWithBaseline, the comparison runs against the old baseline before it is replaced.
 
 .PARAMETER CompareWithBaseline
 Compare current membership with the baseline file and report Added/Removed members.
 
 .PARAMETER AlertEmailTo
-Optional recipients for an e-mail alert when changes are detected. Supports -WhatIf.
+Optional recipients for an e-mail alert when changes are detected. Requires -From and -SmtpServer. Supports -WhatIf.
+
+.PARAMETER From
+Sender address for the alert e-mail (for example alerts@contoso.com). Required with -AlertEmailTo.
 
 .PARAMETER SmtpServer
-SMTP server used for the alert e-mail. Default localhost.
+SMTP server used for the alert e-mail. Required with -AlertEmailTo; there is no default. The mail is sent
+unauthenticated and without TLS, so use an internal relay that accepts it.
 
 .PARAMETER SmtpPort
 SMTP port used for the alert e-mail. Default 25.
@@ -52,14 +59,17 @@ SMTP port used for the alert e-mail. Default 25.
 .\Get-PrivilegedGroupChange.ps1 -UpdateBaseline -OutputPath D:\Reports -CustomerName Contoso
 
 .EXAMPLE
-.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -OutputPath D:\Reports -CustomerName Contoso -AlertEmailTo secops@contoso.com -SmtpServer smtp.contoso.com
+.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -OutputPath D:\Reports -CustomerName Contoso -AlertEmailTo secops@contoso.com -From alerts@contoso.com -SmtpServer smtp.contoso.com
+
+.EXAMPLE
+.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -UpdateBaseline -OutputPath D:\Reports -CustomerName Contoso
 
 .NOTES
 Platform:     Windows (RSAT ActiveDirectory module, domain-joined machine)
 Permissions:  Read-only domain user (read access to group membership and user attributes)
 When to use:  Scheduled monitoring for unexpected additions to Domain Admins and other privileged groups, or a point-in-time privileged access review.
 Safety:       Changes data (supports -WhatIf)
-Version:      1.0
+Version:      1.1
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -84,12 +94,17 @@ param(
     [switch]$UpdateBaseline,
     [switch]$CompareWithBaseline,
     [string[]]$AlertEmailTo,
-    [string]$SmtpServer = "localhost",
+    [string]$From,
+    [string]$SmtpServer,
     [int]$SmtpPort = 25
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($AlertEmailTo -and (-not $From -or -not $SmtpServer)) {
+    throw '-AlertEmailTo requires both -From and -SmtpServer.'
+}
 
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
@@ -224,13 +239,7 @@ Write-Log "Found $($CurrentMembership.Count) privileged members"
 
 $Changes = @()
 
-if ($UpdateBaseline) {
-    if ($PSCmdlet.ShouldProcess($BaselinePath, 'Write privileged group baseline')) {
-        $CurrentMembership | Export-Clixml -LiteralPath $BaselinePath -Depth 5
-        Write-Log "Baseline updated: $BaselinePath"
-    }
-}
-
+# Compare against the existing baseline first; the baseline is only overwritten afterwards.
 if ($CompareWithBaseline -and (Test-Path -LiteralPath $BaselinePath)) {
     $Baseline = @(Import-Clixml -LiteralPath $BaselinePath)
     $Changes = @(Find-Changes -Current $CurrentMembership -Baseline $Baseline)
@@ -243,6 +252,13 @@ if ($CompareWithBaseline -and (Test-Path -LiteralPath $BaselinePath)) {
 }
 elseif ($CompareWithBaseline) {
     Write-Log "Baseline not found: $BaselinePath. Use the same -OutputPath/-CustomerName as the run that created it, or run with -UpdateBaseline first." 'WARN'
+}
+
+if ($UpdateBaseline) {
+    if ($PSCmdlet.ShouldProcess($BaselinePath, 'Write privileged group baseline')) {
+        $CurrentMembership | Export-Clixml -LiteralPath $BaselinePath -Depth 5
+        Write-Log "Baseline updated: $BaselinePath"
+    }
 }
 
 $SecurityWarnings = @($CurrentMembership | Where-Object {
@@ -341,9 +357,18 @@ if ($Changes.Count -gt 0 -and $AlertEmailTo) {
         $Body = "Privileged account changes detected: $($Changes.Count) changes found.`n`n"
         $Body += ($Changes | ForEach-Object { "$($_.Type): $($_.Detail)" }) -join "`n"
         if ($PSCmdlet.ShouldProcess(($AlertEmailTo -join ', '), 'Send privileged group change alert e-mail')) {
-            Send-MailMessage -To $AlertEmailTo -From "privileged-monitor@$((Get-ADDomain).DNSRoot)" `
-                -Subject "[ALERT] Privileged Account Changes Detected" -Body $Body `
-                -SmtpServer $SmtpServer -Port $SmtpPort -ErrorAction Stop
+            $Message = New-Object System.Net.Mail.MailMessage
+            $Smtp = New-Object System.Net.Mail.SmtpClient($SmtpServer, $SmtpPort)
+            try {
+                $Message.From = New-Object System.Net.Mail.MailAddress($From)
+                foreach ($Recipient in $AlertEmailTo) { $Message.To.Add($Recipient) }
+                $Message.Subject = "[ALERT] Privileged Account Changes Detected"
+                $Message.Body = $Body
+                $Smtp.Send($Message)
+            } finally {
+                $Message.Dispose()
+                $Smtp.Dispose()
+            }
             Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
         }
     } catch {
