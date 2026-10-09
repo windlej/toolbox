@@ -30,7 +30,10 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 Also write the rule rows to a CSV next to the HTML report.
 
 .PARAMETER SuspiciousKeywords
-Keywords that flag a rule when found in its name, description or action text. A built-in list is used by default.
+Keywords that flag a rule when found in its name, description or action text. A built-in list focused on
+forwarding and exfiltration terms is used by default (generic words such as "rule", "copy" and "archive" are
+deliberately not included because they flag benign rules). Delete, mark-as-read and stop-processing actions are
+flagged separately and do not need a keyword.
 
 .PARAMETER SuspiciousDomains
 Optional list of domains; rules forwarding or redirecting to any of them are flagged.
@@ -55,7 +58,7 @@ Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
 Permissions:  Exchange Online roles View-Only Recipients and Mail Recipients (Get-InboxRule reads other users' rules)
 When to use:  After a phishing or business-email-compromise incident, or as a periodic sweep for attacker-created inbox rules.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -65,10 +68,9 @@ param(
     [string]$CustomerName,
     [switch]$ExportCsv,
     [string[]]$SuspiciousKeywords = @(
-        "forward", "redirect", "auto forward", "auto reply", "external",
-        "transfer", "copy", "bcc", "rule", "delete", "permanent delete",
-        "archive", "move to", "mark as read", "report spam",
-        "forwarding", "email forwarding", "automatic reply"
+        "forward", "redirect", "auto forward", "external",
+        "transfer", "bcc", "permanent delete",
+        "forwarding", "email forwarding"
     ),
     [string[]]$SuspiciousDomains,
     [int]$MaxRuleReportLength = 5000,
