@@ -56,6 +56,8 @@ param(
     [switch]$SkipAzConnect
 )
 
+Set-StrictMode -Version Latest
+
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
     if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }

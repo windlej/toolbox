@@ -62,6 +62,7 @@ param(
     [switch]$SkipExchangeConnect
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Resolve-OutputPath {

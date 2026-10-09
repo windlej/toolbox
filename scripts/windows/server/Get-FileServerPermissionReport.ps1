@@ -83,6 +83,7 @@ param(
     [string[]]$ComputerName = @($env:COMPUTERNAME)
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Resolve-OutputPath {
