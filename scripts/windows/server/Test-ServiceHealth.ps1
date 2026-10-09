@@ -10,7 +10,9 @@ For each computer, looks up each service in -ServiceNames and classifies it: Hea
 for example starting or stopping) or Unknown (service not found). The default list covers common infrastructure
 services (IIS, SQL Server, DNS, AD DS, DHCP, file sharing, WinRM and others). Output is an HTML report with a
 summary header, an optional CSV and a log file. If -AlertEmailTo is given and any service is Critical, an
-email is sent through -SmtpServer; nothing else is changed.
+email is sent from -From through -SmtpServer; nothing else is changed (the script stops at start-up if
+-AlertEmailTo is given without -From). Services are read with CIM (Win32_Service), which works in Windows
+PowerShell 5.1 and PowerShell 7; the local computer is queried directly and remote ones over WinRM.
 
 .PARAMETER ComputerName
 One or more computers to check. Default: the local machine. Old name: ComputerNames.
@@ -29,22 +31,26 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 Also write a CSV of the results next to the HTML report.
 
 .PARAMETER AlertEmailTo
-Optional recipients for an alert email when any service is Critical. No email is sent when omitted.
+Optional recipients for an alert email when any service is Critical. No email is sent when omitted. Requires -From.
+
+.PARAMETER From
+Sender address for the alert email (for example alerts@contoso.com). Required with -AlertEmailTo.
 
 .PARAMETER SmtpServer
 SMTP server used for the alert email. Default: localhost.
 
 .PARAMETER ShowAllServices
-Accepted for compatibility; not used by the current logic.
+Report every service found on each computer instead of only the ones in -ServiceNames. Each is classified the
+same way (so stopped automatic services are still Critical).
 
 .EXAMPLE
 .\Test-ServiceHealth.ps1 -OutputPath D:\Reports
 
 .EXAMPLE
-.\Test-ServiceHealth.ps1 -ComputerName SRV01,SRV02 -ServiceNames W3SVC,MSSQLSERVER -AlertEmailTo it@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+.\Test-ServiceHealth.ps1 -ComputerName SRV01,SRV02 -ServiceNames W3SVC,MSSQLSERVER -AlertEmailTo it@contoso.com -From alerts@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
 
 .NOTES
-Platform:     Windows (Windows PowerShell 5.1 for remote Get-Service -ComputerName; WMI/CIM access to targets)
+Platform:     Windows (Windows PowerShell 5.1 or PowerShell 7; CIM over WinRM to remote targets)
 Permissions:  Local administrator (or remote service query rights) on each target computer
 When to use:  After patching or a reboot to confirm services came back, or as a routine health check on application and infrastructure servers.
 Safety:       Read-only
@@ -76,6 +82,9 @@ param(
     [string[]]$AlertEmailTo,
 
     [Parameter(Mandatory = $false)]
+    [string]$From,
+
+    [Parameter(Mandatory = $false)]
     [string]$SmtpServer = "localhost",
 
     [Parameter(Mandatory = $false)]
@@ -84,6 +93,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($AlertEmailTo -and -not $From) {
+    throw '-AlertEmailTo requires -From.'
+}
 
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
@@ -115,10 +128,18 @@ function Get-ServiceStatus {
     )
 
     try {
-        $AllServices = Get-Service -ComputerName $ComputerName -ErrorAction Stop
+        if ($ComputerName -eq $env:COMPUTERNAME) {
+            $AllServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)
+        } else {
+            $AllServices = @(Get-CimInstance -ComputerName $ComputerName -ClassName Win32_Service -ErrorAction Stop)
+        }
     } catch {
         Write-Log "Cannot connect to $ComputerName : $($_.Exception.Message)" 'WARN'
         return @()
+    }
+
+    if ($ShowAllServices) {
+        $Services = @($AllServices | ForEach-Object { $_.Name })
     }
 
     $Results = foreach ($ServiceName in $Services) {
@@ -136,11 +157,9 @@ function Get-ServiceStatus {
             continue
         }
 
-        $StartType = try {
-            (Get-CimInstance -ComputerName $ComputerName -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop).StartMode
-        } catch { "Unknown" }
+        $StartType = $Service.StartMode
 
-        $Health = switch ($Service.Status) {
+        $Health = switch ($Service.State) {
             "Running" { "Healthy" }
             "Stopped" {
                 if ($StartType -eq "Auto" -or $StartType -eq "Automatic") { "Critical" }
@@ -153,7 +172,7 @@ function Get-ServiceStatus {
             ComputerName = $ComputerName.ToUpper()
             ServiceName  = $Service.Name
             DisplayName  = $Service.DisplayName
-            Status       = $Service.Status
+            Status       = $Service.State
             StartType    = $StartType
             Health       = $Health
         }
@@ -220,7 +239,7 @@ td { padding: 6px 8px; border-bottom: 1px solid #ddd; }
 <h1>Service Health Monitoring Report</h1>
 <div class='summary'>
     <strong>Servers:</strong> $(@($ComputerName).Count) |
-    <strong>Services Monitored:</strong> $(@($ServiceNames).Count) |
+    <strong>Services Monitored:</strong> $(if ($ShowAllServices) { 'all' } else { @($ServiceNames).Count }) |
     <strong>Healthy:</strong> $(@($AllResults | Where-Object { $_.Health -eq "Healthy" }).Count) |
     <strong>Critical:</strong> <span style='color:red;'>$($CriticalServices.Count)</span> |
     <strong>Degraded:</strong> <span style='color:orange;'>$($DegradedServices.Count)</span> |
@@ -247,7 +266,7 @@ if ($AlertEmailTo -and $CriticalServices.Count -gt 0) {
         $Body += ($CriticalServices | ForEach-Object {
             "CRITICAL: $($_.ComputerName) - $($_.ServiceName) ($($_.DisplayName)) is $($_.Status)"
         }) -join "`n"
-        Send-MailMessage -To $AlertEmailTo -From "svc-monitor@$env:COMPUTERNAME" `
+        Send-MailMessage -To $AlertEmailTo -From $From `
             -Subject "[SERVICE ALERT] $($CriticalServices.Count) critical services" -Body $Body `
             -SmtpServer $SmtpServer -ErrorAction Stop
         Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
