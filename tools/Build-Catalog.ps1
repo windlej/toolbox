@@ -34,6 +34,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function ConvertTo-Cell([string]$Text) {
+    # Table cells: escape pipes and angle brackets so they do not break the table or render as HTML.
+    ($Text -replace '\|', '\|' -replace '<', '&lt;' -replace '>', '&gt;')
+}
+
 function Get-NoteValue([string]$Notes, [string]$Label) {
     if (-not $Notes) { return '' }
     $m = [regex]::Match($Notes, "(?im)^\s*$([regex]::Escape($Label))\s*(.+?)\s*$")
@@ -129,9 +134,9 @@ foreach ($e in $entries) {
     [void]$sb.AppendLine()
     [void]$sb.AppendLine("| | |`n|---|---|")
     [void]$sb.AppendLine("| Location | ``$($e.RelPath)`` |")
-    [void]$sb.AppendLine("| Platform | $($e.Platform) |")
-    [void]$sb.AppendLine("| Permissions | $($e.Permissions) |")
-    [void]$sb.AppendLine("| Safety | $($e.Safety) |")
+    [void]$sb.AppendLine("| Platform | $(ConvertTo-Cell $e.Platform) |")
+    [void]$sb.AppendLine("| Permissions | $(ConvertTo-Cell $e.Permissions) |")
+    [void]$sb.AppendLine("| Safety | $(ConvertTo-Cell $e.Safety) |")
     [void]$sb.AppendLine()
     [void]$sb.AppendLine('## When to use')
     [void]$sb.AppendLine()
@@ -148,7 +153,7 @@ foreach ($e in $entries) {
         [void]$sb.AppendLine()
         [void]$sb.AppendLine("| Name | Type | Required | Description |`n|---|---|---|---|")
         foreach ($p in $e.Parameters) {
-            [void]$sb.AppendLine("| ``-$($p.Name)`` | $($p.Type) | $(if ($p.Mandatory) { 'Yes' } else { 'No' }) | $($p.Description) |")
+            [void]$sb.AppendLine("| ``-$($p.Name)`` | $($p.Type) | $(if ($p.Mandatory) { 'Yes' } else { 'No' }) | $(ConvertTo-Cell $p.Description) |")
         }
     }
     if ($e.Examples.Count -gt 0) {
@@ -178,7 +183,7 @@ foreach ($group in $entries | Group-Object { "$($_.Kind)|$($_.Category)" } | Sor
     [void]$cat.AppendLine("| Script | What it does | When to use | Safety |`n|---|---|---|---|")
     foreach ($e in $group.Group | Sort-Object Name) {
         $pageName = ([IO.Path]::GetFileNameWithoutExtension($e.Name)) + $(if ($e.Kind -eq 'PowerShell') { '' } else { "-$($e.Kind.ToLower())" })
-        [void]$cat.AppendLine("| [$($e.Name)](scripts/$pageName.md) | $($e.Synopsis) | $($e.WhenToUse) | $($e.Safety) |")
+        [void]$cat.AppendLine("| [$($e.Name)](scripts/$pageName.md) | $($e.Synopsis) | $($e.WhenToUse) | $(ConvertTo-Cell $e.Safety) |")
     }
 }
 Set-Content -LiteralPath (Join-Path $docsDir 'CATALOG.md') -Value $cat.ToString() -Encoding UTF8
