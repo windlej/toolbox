@@ -8,9 +8,11 @@ Customer-agnostic scripts for Microsoft 365, Exchange Online, Azure, Active Dire
 # One-time: where reports go (any folder outside this repo)
 setx TOOLBOX_REPORT_DIR "D:\Reports"
 
-# Browse and run scripts interactively (PowerShell 5.1+, arrow-key menus on 7+)
-./toolbox.ps1
+# Build the single-file picker (one file, every script embedded)
+pwsh ./tools/Build-Toolbox.ps1      # writes dist/toolbox.ps1
 ```
+
+**On a machine without the repo (jumpbox):** copy `dist/toolbox.ps1` over and run it. Pick a category, read the description of each script, press Enter to copy the script to the clipboard (Tab saves it as a file), then paste it into a `.ps1` and run it. `.\toolbox.ps1 -List` prints the catalog and `.\toolbox.ps1 -Name <script> -OutFile <path>` saves one without the menu. Rebuild and re-stage after scripts change.
 
 Or run a script directly. Every script documents itself:
 
@@ -37,9 +39,9 @@ toolbox/
 │   ├── RENAME-MAP.md   # old script names -> current names
 │   ├── scripts/        # generated per-script pages
 │   └── runbooks/ architecture/ troubleshooting/
-├── tools/              # Build-Catalog.ps1, Test-ScriptStandards.ps1, dev helpers
+├── tools/              # Build-Toolbox.ps1 (+ template), Build-Catalog.ps1, Test-ScriptStandards.ps1
 ├── templates/  lab/  projects/
-└── toolbox.ps1         # interactive launcher
+└── dist/               # generated toolbox.ps1 bundle (not committed)
 ```
 
 ## How scripts behave
@@ -52,7 +54,7 @@ toolbox/
 
 ## Requirements
 
-Dependencies are declared in each script's `#Requires` line and shown by the launcher. Common ones:
+Dependencies are declared in each script's `#Requires` line and shown by the picker. Common ones:
 
 | Area | Module |
 |---|---|

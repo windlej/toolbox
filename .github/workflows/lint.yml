@@ -28,3 +28,7 @@ jobs:
         run: |
           ./tools/Build-Catalog.ps1
           git diff --exit-code -- docs/CATALOG.md docs/scripts
+
+      - name: Toolbox bundle builds and parses
+        shell: pwsh
+        run: ./tools/Build-Toolbox.ps1

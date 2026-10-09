@@ -57,7 +57,7 @@ Version:      1.0
 
 Bash and Python scripts carry the same labels (`Synopsis`, `Platform`, `Permissions`, `When to use`, `Safety`, `Examples`) in a leading comment block or docstring.
 
-The launcher and `tools/Build-Catalog.ps1` read these headers. **The header is the documentation**: if it's wrong, the catalog is wrong.
+`tools/Build-Toolbox.ps1` (the picker) and `tools/Build-Catalog.ps1` read these headers. **The header is the documentation**: if it's wrong, the catalog is wrong.
 
 ## 4. No customer data in the repo
 
@@ -108,7 +108,7 @@ Use a `Write-Log` function (timestamp, level `INFO`/`WARN`/`ERROR`) that writes 
 
 ## 9. Parameters
 
-- No `Read-Host` for inputs (the launcher prompts for parameters). The only allowed prompt is the output-path fallback.
+- No `Read-Host` for inputs. The only allowed prompt is the output-path fallback.
 - Common names: `-OutputPath`, `-CustomerName`, `-ComputerName` (string array, defaults to local machine on server scripts), `-SkipConnect`, `-Credential`.
 - Use `[ValidateSet]`, `[ValidateRange]`, and `Mandatory` where they help.
 
