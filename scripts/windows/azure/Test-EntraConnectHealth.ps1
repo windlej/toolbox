@@ -7,13 +7,15 @@ Runs basic Azure/Entra connectivity checks and reports whether on-premises direc
 
 .DESCRIPTION
 Signs in to Azure and records a short list of checks: Az connectivity, tenant discovery, subscription access, and
-(when a Microsoft Graph session exists) whether the tenant has on-premises directory synchronization enabled.
+(via Microsoft Graph) whether the tenant has on-premises directory synchronization enabled.
 When sync is enabled, informational rows are added reminding you to verify sync health and password hash sync
 in the Entra Connect Health portal.
 
 This is a lightweight sanity check, not a full Entra Connect health assessment: it does not read sync cycles,
-connector errors or server status. The sync-status lookup uses Invoke-MgGraphRequest, so run Connect-MgGraph
-(Organization.Read.All) first; without a Graph session the status is reported as undetermined.
+connector errors or server status. The sync-status lookup uses Invoke-MgGraphRequest. An existing Graph session with
+Organization.Read.All is reused; otherwise the script signs in with Connect-MgGraph -Scopes Organization.Read.All.
+If the Graph module is missing, sign-in fails, or -SkipGraphConnect is set, the status is reported as undetermined.
+The "Az Module Connection" check passes when an Az context with an account exists.
 
 Output is an HTML report (primary) with pass/warn/fail counts and one row per check, plus an optional CSV.
 The script makes no changes to Azure or Entra.
@@ -30,6 +32,9 @@ Also write the check results to a CSV next to the HTML report.
 .PARAMETER SkipAzConnect
 Use the existing Az session instead of calling Connect-AzAccount.
 
+.PARAMETER SkipGraphConnect
+Do not call Connect-MgGraph. If no Graph session with Organization.Read.All exists, the sync-status check is skipped and reported as undetermined.
+
 .EXAMPLE
 .\Test-EntraConnectHealth.ps1 -OutputPath D:\Reports
 
@@ -41,7 +46,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources; Micros
 Permissions:  Any Azure RBAC role giving subscription visibility (Reader); Graph delegated Organization.Read.All (Entra role Global Reader or Directory Readers) for the sync status
 When to use:  First-pass check of a hybrid tenant before a migration or when users report that on-premises changes are not syncing.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -51,7 +56,9 @@ param(
 
     [switch]$ExportCsv,
 
-    [switch]$SkipAzConnect
+    [switch]$SkipAzConnect,
+
+    [switch]$SkipGraphConnect
 )
 
 Set-StrictMode -Version Latest
@@ -91,6 +98,31 @@ function Connect-ToAzure {
     }
 }
 
+# Returns $true when a Graph session usable for the organization lookup exists (or was created), else $false.
+function Connect-ToGraph {
+    if (-not (Get-Command -Name Connect-MgGraph -ErrorAction SilentlyContinue)) {
+        Write-Log 'Microsoft.Graph.Authentication is not installed; skipping the sync-status check. Install-Module Microsoft.Graph.Authentication' 'WARN'
+        return $false
+    }
+    $ctx = Get-MgContext
+    if ($ctx -and ($ctx.Scopes -contains 'Organization.Read.All' -or $ctx.Scopes -contains 'Organization.ReadWrite.All')) {
+        Write-Log 'Using the existing Microsoft Graph session.'
+        return $true
+    }
+    if ($SkipGraphConnect) {
+        Write-Log 'No Microsoft Graph session with Organization.Read.All; skipping the sync-status check (-SkipGraphConnect).' 'WARN'
+        return $false
+    }
+    try {
+        Connect-MgGraph -Scopes 'Organization.Read.All' -NoWelcome -ErrorAction Stop | Out-Null
+        Write-Log 'Connected to Microsoft Graph (Organization.Read.All).'
+        return $true
+    } catch {
+        Write-Log "Microsoft Graph connection failed; skipping the sync-status check: $_" 'WARN'
+        return $false
+    }
+}
+
 function Get-ADConnectServer {
     $Uri = "https://graph.microsoft.com/v1.0/organization"
     try {
@@ -110,7 +142,9 @@ if (-not $SkipAzConnect) {
 
 $ADConnectServer = $null
 try {
-    $ADConnectServer = Get-ADConnectServer
+    if (Connect-ToGraph) {
+        $ADConnectServer = Get-ADConnectServer
+    }
     if ($ADConnectServer -eq $true) {
         Write-Log 'Hybrid sync is ENABLED for this tenant.'
     } elseif ($ADConnectServer -eq $false) {
@@ -122,19 +156,19 @@ try {
     Write-Log "Cannot check sync status: $_" 'WARN'
 }
 
-$AADConnect = Get-AzADApplication -ErrorAction SilentlyContinue | Select-Object -First 1
-
-$ConnectivityResults = $false
+$AzContext = $null
 try {
-    Test-AzADServicePrincipalCredential -ErrorAction SilentlyContinue | Out-Null
-    $ConnectivityResults = $true
-} catch { }
+    $AzContext = Get-AzContext -ErrorAction Stop
+} catch {
+    Write-Log "Could not read the Az context: $_" 'WARN'
+}
+$ConnectivityResults = [bool]($AzContext -and $AzContext.Account)
 
 $Results.Add([PSCustomObject]@{
     CheckCategory    = "Azure Connectivity"
     CheckName        = "Az Module Connection"
     Status           = if ($ConnectivityResults) { "Pass" } else { "Fail" }
-    Detail           = if ($ConnectivityResults) { "Connected to Azure" } else { "Connection failed" }
+    Detail           = if ($ConnectivityResults) { "Az session active (context present)" } else { "No Az session (run Connect-AzAccount or omit -SkipAzConnect)" }
 })
 
 try {
