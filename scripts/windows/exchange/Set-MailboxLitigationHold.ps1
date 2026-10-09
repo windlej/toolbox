@@ -10,6 +10,8 @@ Litigation Hold state, duration, note and retention-hold flag. With -EnableHold 
 -HoldDurationDays and -HoldNote) for mailboxes where it is off. With -DisableHold it turns Litigation Hold off for
 mailboxes where it is on. With neither switch, or with -ReportOnly, it only reports.
 
+A mailbox that cannot be found is recorded with the action "Not found" and skipped; no change is attempted.
+
 Disabling a hold can allow preserved data to be purged under the retention policy, so confirm with legal/compliance
 first. Use -WhatIf to preview every change. If both -EnableHold and -DisableHold are given, enabling takes priority.
 
@@ -60,7 +62,7 @@ Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
 Permissions:  Exchange Online roles Mailbox Search or Legal Hold (to set holds) and View-Only Recipients (to report)
 When to use:  Placing custodian mailboxes on hold for legal or compliance requests, or auditing which mailboxes are on hold before offboarding.
 Safety:       Destructive (supports -WhatIf)
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'ByUpn')]
 param(
@@ -233,7 +235,10 @@ try {
         $Current = Get-MailboxHoldStatus -Identity $UPN
 
         $Action = ""
-        if (-not $ReportOnly) {
+        if ($Current.CurrentStatus -eq 'Not Found') {
+            Write-Log "    Mailbox not found: $UPN" 'WARN'
+            $Action = "Not found"
+        } elseif (-not $ReportOnly) {
             if ($EnableHold -and -not $Current.LitigationHoldEnabled) {
                 $Result = Set-LitigationHold -Identity $UPN -Enable $true -DurationDays $HoldDurationDays -Note $HoldNote
                 $Action = $Result
@@ -259,15 +264,17 @@ try {
     $AlreadyOn = @($Results | Where-Object { $_.Action -eq "NoChange" -and $_.CurrentHoldEnabled }).Count
     $AlreadyOff = @($Results | Where-Object { $_.Action -eq "NoChange" -and -not $_.CurrentHoldEnabled }).Count
     $FailedCount = @($Results | Where-Object { $_.Action -eq "Failed" }).Count
+    $NotFoundCount = @($Results | Where-Object { $_.Action -eq "Not found" }).Count
 
     Write-Log 'Summary'
-    Write-Log "Enabled: $EnabledCount | Disabled: $DisabledCount | Already On: $AlreadyOn | Already Off: $AlreadyOff | Failed: $FailedCount"
+    Write-Log "Enabled: $EnabledCount | Disabled: $DisabledCount | Already On: $AlreadyOn | Already Off: $AlreadyOff | Failed: $FailedCount | Not found: $NotFoundCount"
 
     $HtmlRows = $Results | ForEach-Object {
         $RowClass = switch ($_.Action) {
             "Enabled" { "success" }
             "Disabled" { "warning" }
             "Failed" { "danger" }
+            "Not found" { "danger" }
             default { "" }
         }
         "<tr class='$RowClass'>
@@ -302,6 +309,7 @@ td { padding: 5px 8px; border-bottom: 1px solid #ddd; }
     <strong>Disabled:</strong> $DisabledCount |
     <strong>Already On:</strong> $AlreadyOn |
     <strong>Failed:</strong> <span style='color:red;'>$FailedCount</span> |
+    <strong>Not found:</strong> $NotFoundCount |
     <strong>Duration:</strong> $HoldDurationDays days
 </div>
 <table>
