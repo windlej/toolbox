@@ -1,0 +1,30 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  standards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Script standards (naming, headers, output rules, hardcoded values)
+        shell: pwsh
+        run: ./tools/Test-ScriptStandards.ps1
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $results = Invoke-ScriptAnalyzer -Path ./scripts -Recurse -Severity Error
+          $results | Format-Table -AutoSize
+          if ($results) { exit 1 }
+
+      - name: Catalog is up to date
+        shell: pwsh
+        run: |
+          ./tools/Build-Catalog.ps1
+          git diff --exit-code -- docs/CATALOG.md docs/scripts

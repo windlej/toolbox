@@ -1,74 +1,89 @@
 #Requires -Version 5.1
+#Requires -Modules Microsoft.Graph.Authentication, Microsoft.Graph.Identity.SignIns
+
 <#
 .SYNOPSIS
-    Audits Microsoft Entra Conditional Access policies using the Microsoft Graph PowerShell SDK.
+Audits Microsoft Entra Conditional Access policies and flags weak or misconfigured ones.
 
 .DESCRIPTION
-    This script connects to Microsoft Graph using least-privileged permissions,
-    retrieves all Conditional Access (CA) policies, flattens and exports them to
-    JSON and CSV, resolves Named Location GUIDs, and produces a separate risk
-    findings report flagging weak or misconfigured policies.
+Connects to Microsoft Graph with the read-only Policy.Read.All scope, retrieves all Conditional Access (CA)
+policies and Named Locations (GUIDs are resolved to names), and writes three files:
+  - a JSON file with the full, unmodified policy objects,
+  - a flattened CSV with one row per policy (users, apps, locations, platforms, risk levels, grant and
+    session controls),
+  - a findings CSV with risk findings from six rules: disabled policy, report-only policy, no MFA or
+    authentication strength, All Users with no exclusions, overly broad conditions, and no device
+    compliance or hybrid join requirement.
+A summary is printed to the console. This script is read-only.
 
-    Concepts covered:
-      - Conditional Access policy structure (conditions, grantControls, sessionControls)
-      - Named Locations (IP ranges, countries)
-      - Risk-based Conditional Access (signInRiskLevels, userRiskLevels)
-      - Zero Trust principle: verify explicitly, use least privilege, assume breach
+.PARAMETER OutputPath
+Folder for the report files. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER SkipConnect
+Skip Connect-MgGraph and use the existing Microsoft Graph context (useful in automation).
+
+.PARAMETER TenantId
+Optional tenant ID or domain to authenticate against.
+
+.EXAMPLE
+.\Get-ConditionalAccessReport.ps1 -OutputPath D:\Reports
+
+.EXAMPLE
+.\Get-ConditionalAccessReport.ps1 -OutputPath D:\Reports -CustomerName Contoso -TenantId contoso.com
 
 .NOTES
-    Required Module : Microsoft.Graph.Identity.SignIns (part of Microsoft.Graph SDK)
-    Required Scope  : Policy.Read.All
-    Graph Endpoint  : v1.0
-    Author          : CA Audit Script
-    Version         : 2.0
+Platform:     Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK)
+Permissions:  Graph scope Policy.Read.All (Security Reader, Global Reader or Conditional Access Administrator)
+When to use:  Security assessment of a new tenant, or before and after changing Conditional Access to find gaps such as missing MFA or lockout risk.
+Safety:       Read-only
+Version:      2.1
 #>
 
 [CmdletBinding()]
 param (
-    # Output directory for all report files. Defaults to the script's own folder.
-    [string]$OutputPath = $PSScriptRoot,
+    [string]$OutputPath,
 
-    # If specified, suppresses the Connect-MgGraph interactive prompt (useful in
-    # automation with a pre-authenticated context or Managed Identity).
+    [string]$CustomerName,
+
     [switch]$SkipConnect,
 
-    # Tenant ID for authentication. Optional — MgGraph will prompt if omitted.
     [string]$TenantId
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-#region ── Logging Helper ────────────────────────────────────────────────────
-
-function Write-Log {
-    <#
-    .SYNOPSIS  Writes a timestamped, colour-coded message to the console.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('INFO','WARN','ERROR','SUCCESS')][string]$Level = 'INFO'
-    )
-    $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $color = switch ($Level) {
-        'INFO'    { 'Cyan'    }
-        'WARN'    { 'Yellow'  }
-        'ERROR'   { 'Red'     }
-        'SUCCESS' { 'Green'   }
-    }
-    Write-Host "[$ts] [$Level] $Message" -ForegroundColor $color
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
 }
 
-#endregion
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
 
-#region ── Module Preflight ──────────────────────────────────────────────────
+$stamp          = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir         = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Get-ConditionalAccessReport_$stamp.log"
+
+#region -- Module Preflight --------------------------------------------------
 
 function Assert-GraphModule {
     <#
     .SYNOPSIS
         Ensures Microsoft.Graph.Identity.SignIns is available.
-        Installs from PSGallery for the current user if absent.
+        Fails with the install command if the module is missing.
 
     .NOTES
         Microsoft.Graph.Identity.SignIns provides:
@@ -79,19 +94,10 @@ function Assert-GraphModule {
     Write-Log "Checking for module: $moduleName"
 
     if (-not (Get-Module -ListAvailable -Name $moduleName)) {
-        Write-Log "Module '$moduleName' not found. Installing for CurrentUser..." -Level WARN
-        try {
-            Install-Module -Name $moduleName -Scope CurrentUser -Repository PSGallery `
-                           -Force -AllowClobber -ErrorAction Stop
-            Write-Log "Module installed successfully." -Level SUCCESS
-        }
-        catch {
-            Write-Log "Failed to install '$moduleName': $_" -Level ERROR
-            throw
-        }
+        throw "Module '$moduleName' not found. Install it with: Install-Module $moduleName -Scope CurrentUser"
     }
     else {
-        Write-Log "Module '$moduleName' is available." -Level SUCCESS
+        Write-Log "Module '$moduleName' is available." -Level INFO
     }
 
     Import-Module $moduleName -ErrorAction Stop
@@ -99,7 +105,7 @@ function Assert-GraphModule {
 
 #endregion
 
-#region ── Authentication ────────────────────────────────────────────────────
+#region -- Authentication ----------------------------------------------------
 
 function Connect-ToGraph {
     <#
@@ -127,7 +133,7 @@ function Connect-ToGraph {
     try {
         Connect-MgGraph @connectParams -ErrorAction Stop
         $ctx = Get-MgContext
-        Write-Log "Connected as: $($ctx.Account) | Tenant: $($ctx.TenantId)" -Level SUCCESS
+        Write-Log "Connected as: $($ctx.Account) | Tenant: $($ctx.TenantId)" -Level INFO
     }
     catch {
         Write-Log "Graph authentication failed: $_" -Level ERROR
@@ -137,7 +143,7 @@ function Connect-ToGraph {
 
 #endregion
 
-#region ── Named Location Resolution ────────────────────────────────────────
+#region -- Named Location Resolution ----------------------------------------
 
 function Get-NamedLocationMap {
     <#
@@ -158,7 +164,7 @@ function Get-NamedLocationMap {
         foreach ($loc in $namedLocations) {
             $locationMap[$loc.Id] = $loc.DisplayName
         }
-        Write-Log "Resolved $($locationMap.Count) Named Location(s)." -Level SUCCESS
+        Write-Log "Resolved $($locationMap.Count) Named Location(s)." -Level INFO
     }
     catch {
         Write-Log "Could not retrieve Named Locations (non-fatal): $_" -Level WARN
@@ -169,7 +175,7 @@ function Get-NamedLocationMap {
 
 #endregion
 
-#region ── Policy Retrieval ──────────────────────────────────────────────────
+#region -- Policy Retrieval --------------------------------------------------
 
 function Get-AllCaPolicies {
     <#
@@ -185,8 +191,8 @@ function Get-AllCaPolicies {
     #>
     Write-Log "Retrieving all Conditional Access policies..."
     try {
-        $policies = Get-MgIdentityConditionalAccessPolicy -All -ErrorAction Stop
-        Write-Log "Retrieved $($policies.Count) policy/policies." -Level SUCCESS
+        $policies = @(Get-MgIdentityConditionalAccessPolicy -All -ErrorAction Stop)
+        Write-Log "Retrieved $($policies.Count) policy/policies." -Level INFO
         return $policies
     }
     catch {
@@ -197,7 +203,7 @@ function Get-AllCaPolicies {
 
 #endregion
 
-#region ── Policy Flattening ─────────────────────────────────────────────────
+#region -- Policy Flattening -------------------------------------------------
 
 function ConvertTo-FlatPolicy {
     <#
@@ -212,30 +218,30 @@ function ConvertTo-FlatPolicy {
 
     .NOTES
         CA policy conditions hierarchy:
-          conditions.users       → includeUsers / excludeUsers / includeGroups / excludeGroups
-          conditions.applications → includeApplications / excludeApplications
-          conditions.locations   → includeLocations / excludeLocations
-          conditions.platforms   → includePlatforms / excludePlatforms
-          conditions.signInRiskLevels / userRiskLevels → risk-based access control
-        GrantControls.operator   → 'AND' (all controls) or 'OR' (any control)
-        GrantControls.builtInControls → mfa, compliantDevice, domainJoinedDevice, etc.
+          conditions.users       -> includeUsers / excludeUsers / includeGroups / excludeGroups
+          conditions.applications -> includeApplications / excludeApplications
+          conditions.locations   -> includeLocations / excludeLocations
+          conditions.platforms   -> includePlatforms / excludePlatforms
+          conditions.signInRiskLevels / userRiskLevels -> risk-based access control
+        GrantControls.operator   -> 'AND' (all controls) or 'OR' (any control)
+        GrantControls.builtInControls -> mfa, compliantDevice, domainJoinedDevice, etc.
     #>
     param(
         [Parameter(Mandatory)]$Policy,
         [hashtable]$LocationMap = @{}
     )
 
-    # ── Helper: resolve a list of location GUIDs to names ──────────────────
+    # -- Helper: resolve a list of location GUIDs to names ------------------
     $resolveLocations = {
         param([string[]]$ids)
         if (-not $ids) { return '' }
         ($ids | ForEach-Object { if ($LocationMap[$_]) { $LocationMap[$_] } else { $_ } }) -join '; '
     }
 
-    # ── Helper: safely join array values ───────────────────────────────────
+    # -- Helper: safely join array values -----------------------------------
     $join = { param([object[]]$arr) if ($arr) { $arr -join '; ' } else { '' } }
 
-    # ── Conditions shortcuts ────────────────────────────────────────────────
+    # -- Conditions shortcuts ------------------------------------------------
     $cond  = $Policy.Conditions
     $users = $cond.Users
     $apps  = $cond.Applications
@@ -245,14 +251,14 @@ function ConvertTo-FlatPolicy {
     $sess  = $Policy.SessionControls
 
     [PSCustomObject]@{
-        # ── Identity ────────────────────────────────────────────────────────
+        # -- Identity --------------------------------------------------------
         PolicyId                    = $Policy.Id
         DisplayName                 = $Policy.DisplayName
         State                       = $Policy.State
         CreatedDateTime             = $Policy.CreatedDateTime
         ModifiedDateTime            = $Policy.ModifiedDateTime
 
-        # ── User Conditions ─────────────────────────────────────────────────
+        # -- User Conditions -------------------------------------------------
         IncludeUsers                = & $join $users.IncludeUsers
         ExcludeUsers                = & $join $users.ExcludeUsers
         IncludeGroups               = & $join $users.IncludeGroups
@@ -260,27 +266,27 @@ function ConvertTo-FlatPolicy {
         IncludeRoles                = & $join $users.IncludeRoles
         ExcludeRoles                = & $join $users.ExcludeRoles
 
-        # ── Application Conditions ──────────────────────────────────────────
+        # -- Application Conditions ------------------------------------------
         IncludeApplications         = & $join $apps.IncludeApplications
         ExcludeApplications         = & $join $apps.ExcludeApplications
         IncludeUserActions          = & $join $apps.IncludeUserActions
 
-        # ── Location Conditions (GUIDs resolved to names) ───────────────────
+        # -- Location Conditions (GUIDs resolved to names) -------------------
         IncludeLocations            = & $resolveLocations $locs.IncludeLocations
         ExcludeLocations            = & $resolveLocations $locs.ExcludeLocations
 
-        # ── Platform Conditions ─────────────────────────────────────────────
+        # -- Platform Conditions ---------------------------------------------
         IncludePlatforms            = & $join $plat.IncludePlatforms
         ExcludePlatforms            = & $join $plat.ExcludePlatforms
 
-        # ── Risk Conditions (Zero Trust: risk-based access) ─────────────────
+        # -- Risk Conditions (Zero Trust: risk-based access) -----------------
         SignInRiskLevels            = & $join $cond.SignInRiskLevels
         UserRiskLevels              = & $join $cond.UserRiskLevels
 
-        # ── Client App Types ────────────────────────────────────────────────
+        # -- Client App Types ------------------------------------------------
         ClientAppTypes              = & $join $cond.ClientAppTypes
 
-        # ── Grant Controls ──────────────────────────────────────────────────
+        # -- Grant Controls --------------------------------------------------
         # builtInControls: mfa, compliantDevice, domainJoinedDevice,
         #                  approvedApplication, compliantApplication
         GrantOperator               = $grant.Operator
@@ -289,7 +295,7 @@ function ConvertTo-FlatPolicy {
         GrantTermsOfUse             = & $join $grant.TermsOfUse
         GrantAuthStrengthId         = $grant.AuthenticationStrength.Id
 
-        # ── Session Controls ────────────────────────────────────────────────
+        # -- Session Controls ------------------------------------------------
         # sessionControls govern token lifetime, app-enforced restrictions, MCAS
         SessionAppEnforcedRestrictions = [bool]$sess.ApplicationEnforcedRestrictions.IsEnabled
         SessionCloudAppSecurity     = $sess.CloudAppSecurity.CloudAppSecurityType
@@ -303,7 +309,7 @@ function ConvertTo-FlatPolicy {
 
 #endregion
 
-#region ── Risk Analysis Engine ──────────────────────────────────────────────
+#region -- Risk Analysis Engine ----------------------------------------------
 
 function Invoke-CaRiskAnalysis {
     <#
@@ -349,7 +355,7 @@ function Invoke-CaRiskAnalysis {
         $excludeUsers = @($users.ExcludeUsers)
         $excludeGroups = @($users.ExcludeGroups)
 
-        # ── Helper: add a finding ───────────────────────────────────────────
+        # -- Helper: add a finding -------------------------------------------
         $addFinding = {
             param([string]$RuleId, [string]$Severity, [string]$Finding, [string]$Recommendation)
             $findings.Add([PSCustomObject]@{
@@ -363,7 +369,7 @@ function Invoke-CaRiskAnalysis {
             })
         }
 
-        # ── RULE-01: Disabled policy ────────────────────────────────────────
+        # -- RULE-01: Disabled policy ----------------------------------------
         if ($state -eq 'disabled') {
             & $addFinding `
                 -RuleId         'RULE-01' `
@@ -372,7 +378,7 @@ function Invoke-CaRiskAnalysis {
                 -Recommendation 'Review whether this policy is intentionally disabled. Enable or delete if no longer needed.'
         }
 
-        # ── RULE-02: Report-only mode ───────────────────────────────────────
+        # -- RULE-02: Report-only mode ---------------------------------------
         if ($state -eq 'enabledForReportingButNotEnforcing') {
             & $addFinding `
                 -RuleId         'RULE-02' `
@@ -381,7 +387,7 @@ function Invoke-CaRiskAnalysis {
                 -Recommendation 'Validate policy impact in Sign-In Logs and transition to Enabled state.'
         }
 
-        # ── RULE-03: No MFA requirement ─────────────────────────────────────
+        # -- RULE-03: No MFA requirement -------------------------------------
         $hasMfa = $controls -contains 'mfa'
         $hasAuthStrength = $null -ne $grant.AuthenticationStrength.Id
         if (-not $hasMfa -and -not $hasAuthStrength) {
@@ -392,7 +398,7 @@ function Invoke-CaRiskAnalysis {
                 -Recommendation 'Add MFA (or a phishing-resistant Authentication Strength) to grantControls.builtInControls.'
         }
 
-        # ── RULE-04: All users, no exclusions ───────────────────────────────
+        # -- RULE-04: All users, no exclusions -------------------------------
         $targetsAllUsers = $includeUsers -contains 'All'
         $hasExclusions   = ($excludeUsers.Count -gt 0) -or ($excludeGroups.Count -gt 0)
         if ($targetsAllUsers -and -not $hasExclusions) {
@@ -403,7 +409,7 @@ function Invoke-CaRiskAnalysis {
                 -Recommendation 'Exclude at least one break-glass/emergency-access account or group to prevent lockout.'
         }
 
-        # ── RULE-05: No meaningful conditions ───────────────────────────────
+        # -- RULE-05: No meaningful conditions -------------------------------
         $allApps      = @($apps.IncludeApplications) -contains 'All'
         $noLocCond    = (-not $cond.Locations.IncludeLocations) -or
                         (@($cond.Locations.IncludeLocations) -contains 'All')
@@ -419,7 +425,7 @@ function Invoke-CaRiskAnalysis {
                 -Recommendation 'Review whether narrower conditions (location, platform, risk level) are appropriate to reduce blast radius.'
         }
 
-        # ── RULE-06: No device compliance / hybrid join ──────────────────────
+        # -- RULE-06: No device compliance / hybrid join ----------------------
         $hasDeviceControl = ($controls -contains 'compliantDevice') -or
                             ($controls -contains 'domainJoinedDevice')
         if (-not $hasDeviceControl -and $state -eq 'enabled') {
@@ -436,7 +442,7 @@ function Invoke-CaRiskAnalysis {
 
 #endregion
 
-#region ── Summary Statistics ────────────────────────────────────────────────
+#region -- Summary Statistics ------------------------------------------------
 
 function Write-AuditSummary {
     <#
@@ -449,20 +455,20 @@ function Write-AuditSummary {
     )
 
     $total       = $FlatPolicies.Count
-    $enabled     = ($FlatPolicies | Where-Object State -eq 'enabled').Count
-    $disabled    = ($FlatPolicies | Where-Object State -eq 'disabled').Count
-    $reportOnly  = ($FlatPolicies | Where-Object State -eq 'enabledForReportingButNotEnforcing').Count
-    $withMfa     = ($FlatPolicies | Where-Object {
+    $enabled     = @($FlatPolicies | Where-Object State -eq 'enabled').Count
+    $disabled    = @($FlatPolicies | Where-Object State -eq 'disabled').Count
+    $reportOnly  = @($FlatPolicies | Where-Object State -eq 'enabledForReportingButNotEnforcing').Count
+    $withMfa     = @($FlatPolicies | Where-Object {
                         $_.GrantBuiltInControls -match 'mfa' -or
                         $_.GrantAuthStrengthId  -ne ''
                    }).Count
     $mfaPct      = if ($total -gt 0) { [math]::Round(($withMfa / $total) * 100, 1) } else { 0 }
 
-    $highFindings   = ($Findings | Where-Object Severity -eq 'High').Count
-    $medFindings    = ($Findings | Where-Object Severity -eq 'Medium').Count
-    $lowFindings    = ($Findings | Where-Object Severity -eq 'Low').Count
+    $highFindings   = @($Findings | Where-Object Severity -eq 'High').Count
+    $medFindings    = @($Findings | Where-Object Severity -eq 'Medium').Count
+    $lowFindings    = @($Findings | Where-Object Severity -eq 'Low').Count
 
-    $divider = '─' * 55
+    $divider = '-' * 55
     Write-Host ""
     Write-Host $divider                              -ForegroundColor DarkCyan
     Write-Host "  CONDITIONAL ACCESS AUDIT SUMMARY" -ForegroundColor White
@@ -484,7 +490,7 @@ function Write-AuditSummary {
 
 #endregion
 
-#region ── File Export Helpers ───────────────────────────────────────────────
+#region -- File Export Helpers -----------------------------------------------
 
 function Export-ToJson {
     param(
@@ -492,9 +498,9 @@ function Export-ToJson {
         [Parameter(Mandatory)][string]$FilePath
     )
     # Depth 10 ensures no nested Graph object is truncated.
-    # Conditional Access policy objects can be 4–6 levels deep.
-    $Data | ConvertTo-Json -Depth 10 | Out-File -FilePath $FilePath -Encoding utf8 -Force
-    Write-Log "JSON export written: $FilePath" -Level SUCCESS
+    # Conditional Access policy objects can be 4-6 levels deep.
+    $Data | ConvertTo-Json -Depth 10 | Out-File -LiteralPath $FilePath -Encoding utf8 -Force
+    Write-Log "JSON export written: $FilePath" -Level INFO
 }
 
 function Export-ToCsv {
@@ -502,38 +508,35 @@ function Export-ToCsv {
         [Parameter(Mandatory)][object[]]$Data,
         [Parameter(Mandatory)][string]$FilePath
     )
-    $Data | Export-Csv -Path $FilePath -NoTypeInformation -Encoding utf8 -Force
-    Write-Log "CSV export written: $FilePath" -Level SUCCESS
+    $Data | Export-Csv -LiteralPath $FilePath -NoTypeInformation -Encoding utf8 -Force
+    Write-Log "CSV export written: $FilePath" -Level INFO
 }
 
 #endregion
 
-#region ── MAIN ──────────────────────────────────────────────────────────────
+#region -- MAIN --------------------------------------------------------------
 
 try {
     Write-Log "=== Conditional Access Policy Audit Started ===" -Level INFO
 
-    # ── Step 1: Ensure output directory exists ──────────────────────────────
-    if (-not (Test-Path $OutputPath)) {
-        New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-        Write-Log "Created output directory: $OutputPath"
-    }
+    # -- Step 1: Ensure output directory exists ------------------------------
+    Write-Log "Output folder: $outDir"
 
-    $jsonPath     = Join-Path $OutputPath 'CA-Policies.json'
-    $csvPath      = Join-Path $OutputPath 'CA-Policies.csv'
-    $findingsPath = Join-Path $OutputPath 'CA-RiskyFindings.csv'
+    $jsonPath     = Join-Path $outDir "Get-ConditionalAccessReport_$stamp.json"
+    $csvPath      = Join-Path $outDir "Get-ConditionalAccessReport_$stamp.csv"
+    $findingsPath = Join-Path $outDir "Get-ConditionalAccessReport_${stamp}_Findings.csv"
 
-    # ── Step 2: Module check ────────────────────────────────────────────────
+    # -- Step 2: Module check ------------------------------------------------
     Assert-GraphModule
 
-    # ── Step 3: Authenticate ────────────────────────────────────────────────
+    # -- Step 3: Authenticate ------------------------------------------------
     if (-not $SkipConnect) {
         $connectArgs = @{}
         if ($TenantId) { $connectArgs['TenantId'] = $TenantId }
         Connect-ToGraph @connectArgs
     }
     else {
-        Write-Log "SkipConnect specified — using existing MgGraph context." -Level WARN
+        Write-Log "SkipConnect specified - using existing MgGraph context." -Level WARN
         $ctx = Get-MgContext
         if (-not $ctx) {
             throw "No active Microsoft Graph context found. Remove -SkipConnect or run Connect-MgGraph first."
@@ -541,10 +544,10 @@ try {
         Write-Log "Using context: $($ctx.Account) | Tenant: $($ctx.TenantId)" -Level INFO
     }
 
-    # ── Step 4: Retrieve Named Locations for GUID resolution ────────────────
+    # -- Step 4: Retrieve Named Locations for GUID resolution ----------------
     $locationMap = Get-NamedLocationMap
 
-    # ── Step 5: Retrieve all CA policies ────────────────────────────────────
+    # -- Step 5: Retrieve all CA policies ------------------------------------
     $rawPolicies = Get-AllCaPolicies
 
     if ($rawPolicies.Count -eq 0) {
@@ -552,33 +555,33 @@ try {
         exit 0
     }
 
-    # ── Step 6: Export full raw objects to JSON (deep, unmodified) ──────────
+    # -- Step 6: Export full raw objects to JSON (deep, unmodified) ----------
     # Preserves every nested property exactly as returned by Graph API v1.0.
     Export-ToJson -Data $rawPolicies -FilePath $jsonPath
 
-    # ── Step 7: Flatten each policy for CSV export ───────────────────────────
+    # -- Step 7: Flatten each policy for CSV export ---------------------------
     Write-Log "Flattening $($rawPolicies.Count) policies for CSV export..."
-    $flatPolicies = $rawPolicies | ForEach-Object {
+    $flatPolicies = @($rawPolicies | ForEach-Object {
         ConvertTo-FlatPolicy -Policy $_ -LocationMap $locationMap
-    }
+    })
     Export-ToCsv -Data $flatPolicies -FilePath $csvPath
 
-    # ── Step 8: Run risk analysis ────────────────────────────────────────────
+    # -- Step 8: Run risk analysis --------------------------------------------
     Write-Log "Running risk analysis against $($rawPolicies.Count) policies..."
-    $findings = Invoke-CaRiskAnalysis -Policies $rawPolicies
+    $findings = @(Invoke-CaRiskAnalysis -Policies $rawPolicies)
 
     if ($findings.Count -gt 0) {
-        # Sort findings: High → Medium → Low, then by PolicyName
+        # Sort findings: High -> Medium -> Low, then by PolicyName
         $severityOrder = @{ 'High' = 1; 'Medium' = 2; 'Low' = 3 }
-        $sortedFindings = $findings | Sort-Object {
+        $sortedFindings = @($findings | Sort-Object {
             $severityOrder[$_.Severity]
-        }, PolicyName
+        }, PolicyName)
 
         Export-ToCsv -Data $sortedFindings -FilePath $findingsPath
         Write-Log "$($findings.Count) finding(s) written to: $findingsPath" -Level WARN
     }
     else {
-        Write-Log "No risk findings detected. Writing empty findings file." -Level SUCCESS
+        Write-Log "No risk findings detected. Writing empty findings file." -Level INFO
         [PSCustomObject]@{
             PolicyName     = 'N/A'
             PolicyId       = 'N/A'
@@ -587,17 +590,17 @@ try {
             Severity       = 'N/A'
             Finding        = 'No risky configurations detected.'
             Recommendation = 'N/A'
-        } | Export-Csv -Path $findingsPath -NoTypeInformation -Encoding utf8 -Force
+        } | Export-Csv -LiteralPath $findingsPath -NoTypeInformation -Encoding utf8 -Force
     }
 
-    # ── Step 9: Print summary dashboard ─────────────────────────────────────
+    # -- Step 9: Print summary dashboard -------------------------------------
     Write-AuditSummary -FlatPolicies $flatPolicies -Findings $findings
 
     Write-Log "Output files:" -Level INFO
-    Write-Log "  JSON (full)    → $jsonPath"
-    Write-Log "  CSV  (summary) → $csvPath"
-    Write-Log "  CSV  (findings)→ $findingsPath"
-    Write-Log "=== Audit Completed Successfully ===" -Level SUCCESS
+    Write-Log "  JSON (full)    -> $jsonPath"
+    Write-Log "  CSV  (summary) -> $csvPath"
+    Write-Log "  CSV  (findings)-> $findingsPath"
+    Write-Log "=== Audit Completed Successfully ===" -Level INFO
 }
 catch {
     Write-Log "FATAL: $($_.Exception.Message)" -Level ERROR

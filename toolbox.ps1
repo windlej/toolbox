@@ -3,25 +3,26 @@
 .SYNOPSIS
   Toolbox — interactive TUI launcher for infrastructure automation scripts.
 .DESCRIPTION
-  Discovers scripts under scripts/windows/, parses parameters via AST,
-  provides interactive parameter input, module dependency checking, and
-  multiple execution modes (run, print, clipboard, new process, remote).
+  Discovers scripts under scripts/ (windows PowerShell by domain, network
+  bash, python), reads each script's comment-based help (synopsis, when to
+  use, permissions, safety, examples), parses parameters via AST, provides
+  interactive parameter input, module dependency checking, and multiple
+  execution modes (run, print, clipboard, new process, remote).
 .NOTES
   Requires PowerShell 5.1 or later. Arrow-key menus on PS7+, numbered
   fallback on PS5.1. Zero external dependencies for the launcher itself.
+  Script documentation comes from the script headers; see docs/DESIGN-GUIDE.md.
 #>
 [CmdletBinding()]
-param(
-    [switch]$UpdateManifest
-)
+param()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 $ScriptRoot = Split-Path -Parent $PSCommandPath
-$ScriptsRoot = Join-Path (Join-Path $ScriptRoot "scripts") "windows"
-$ManifestPath = Join-Path (Join-Path $ScriptRoot "scripts") "toolbox-manifest.json"
+$ScriptsRoot = Join-Path $ScriptRoot "scripts"
+$OnWindows = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
 $HostProgram = if ($PSVersionTable.PSVersion.Major -ge 7) { "pwsh" } else { "powershell.exe" }
 
 $CategoryNames = @{
@@ -30,7 +31,11 @@ $CategoryNames = @{
     "azure"            = "Azure / Cloud"
     "active-directory" = "Active Directory"
     "server"           = "Windows Server"
+    "endpoint"         = "Endpoint / Workstation"
     "security"         = "Security"
+    "network"          = "Network (bash, run from macOS/Linux)"
+    "python-automation" = "Python / Automation"
+    "python-networking" = "Python / Networking"
 }
 
 $KnownModuleMap = @{
@@ -113,97 +118,107 @@ function Center-Text {
     return (" " * $Pad) + $Text
 }
 
-function ConvertTo-Hashtable {
-    <#
-    .SYNOPSIS
-      Recursively converts PSCustomObject (from ConvertFrom-Json on PS5.1)
-      to a nested hashtable so .ContainsKey() works cross-version.
-      On PS6+ where -AsHashtable exists, objects already arrive as hashtables.
-    #>
-    param([object]$InputObject)
-    if ($null -eq $InputObject) { return $null }
-    if ($InputObject -is [PSCustomObject]) {
-        $Hash = [ordered]@{}
-        foreach ($Prop in $InputObject.PSObject.Properties) {
-            $Hash[$Prop.Name] = ConvertTo-Hashtable -InputObject $Prop.Value
-        }
-        return $Hash
-    }
-    if ($InputObject -is [array]) {
-        return @($InputObject | ForEach-Object { ConvertTo-Hashtable -InputObject $_ })
-    }
-    if ($InputObject -is [System.Collections.IDictionary]) {
-        $Hash = [ordered]@{}
-        foreach ($Key in $InputObject.Keys) {
-            $Hash[$Key] = ConvertTo-Hashtable -InputObject $InputObject[$Key]
-        }
-        return $Hash
-    }
-    return $InputObject
-}
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # AST / SCRIPT CATALOG
 # ═══════════════════════════════════════════════════════════════════════════════
 
+function Get-NoteValue {
+    param([string]$Notes, [string]$Label)
+    if (-not $Notes) { return "" }
+    $M = [regex]::Match($Notes, "(?im)^\s*$([regex]::Escape($Label))\s*(.+?)\s*$")
+    if ($M.Success) { return $M.Groups[1].Value }
+    return ""
+}
+
 function Get-ScriptCatalog {
     <#
     .SYNOPSIS
-      Walks scripts/windows/ subdirectories, parses each .ps1 via the AST,
-      extracts parameters, dependencies, and description. Merges with optional
-      manifest.json for enriched descriptions and examples.
+      Walks scripts/windows/<domain>, scripts/network and scripts/python/<domain>,
+      and builds a catalog entry per script from its header (comment-based help
+      for PowerShell, leading comment block for bash/Python) and the AST.
     #>
     $Catalog = [System.Collections.Generic.List[PSObject]]::new()
-    $Manifest = @{}
+    $Sources = [System.Collections.Generic.List[PSObject]]::new()
 
-    if (Test-Path $ManifestPath) {
-        try {
-            $Manifest = Get-Content $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json | ConvertTo-Hashtable
-        } catch {
-            Write-Warn "Manifest load failed, continuing with AST-only: $_"
+    $WindowsRoot = Join-Path $ScriptsRoot "windows"
+    if (Test-Path $WindowsRoot) {
+        foreach ($Folder in (Get-ChildItem $WindowsRoot -Directory | Sort-Object Name)) {
+            $Sources.Add([PSCustomObject]@{ Key = $Folder.Name; Dir = $Folder.FullName; Filter = "*.ps1"; Kind = "PowerShell" })
+        }
+    }
+    $NetworkRoot = Join-Path $ScriptsRoot "network"
+    if (Test-Path $NetworkRoot) {
+        $Sources.Add([PSCustomObject]@{ Key = "network"; Dir = $NetworkRoot; Filter = "*.sh"; Kind = "bash" })
+    }
+    $PythonRoot = Join-Path $ScriptsRoot "python"
+    if (Test-Path $PythonRoot) {
+        foreach ($Folder in (Get-ChildItem $PythonRoot -Directory | Sort-Object Name)) {
+            $Sources.Add([PSCustomObject]@{ Key = "python-$($Folder.Name)"; Dir = $Folder.FullName; Filter = "*.py"; Kind = "Python" })
         }
     }
 
-    if (-not (Test-Path $ScriptsRoot)) {
-        Write-Err "Scripts root not found: $ScriptsRoot"
+    if ($Sources.Count -eq 0) {
+        Write-Err "No script folders found under: $ScriptsRoot"
         return $Catalog
     }
 
-    $Folders = Get-ChildItem $ScriptsRoot -Directory | Sort-Object Name
+    foreach ($Source in $Sources) {
+        $CategoryName = $CategoryNames[$Source.Key]
+        if (-not $CategoryName) { $CategoryName = $Source.Key }
 
-    foreach ($Folder in $Folders) {
-        $CategoryKey = $Folder.Name
-        $CategoryName = $CategoryNames[$CategoryKey]
-        if (-not $CategoryName) { $CategoryName = $CategoryKey }
-
-        $ScriptFiles = Get-ChildItem $Folder -Filter "*.ps1" -File | Sort-Object Name
-
-        foreach ($File in $ScriptFiles) {
-            $ScriptInfo = Parse-ScriptFile -Path $File.FullName -CategoryKey $CategoryKey -CategoryName $CategoryName -Manifest $Manifest
-            $Catalog.Add($ScriptInfo)
+        foreach ($File in (Get-ChildItem $Source.Dir -Filter $Source.Filter -File | Sort-Object Name)) {
+            if ($Source.Kind -eq "PowerShell") {
+                $Catalog.Add((Parse-ScriptFile -Path $File.FullName -CategoryKey $Source.Key -CategoryName $CategoryName))
+            } else {
+                $Catalog.Add((Parse-ForeignScript -Path $File.FullName -CategoryKey $Source.Key -CategoryName $CategoryName -Kind $Source.Kind))
+            }
         }
     }
 
     return $Catalog
 }
 
+function Parse-ForeignScript {
+    <#
+    .SYNOPSIS
+      Reads the leading comment block of a bash/Python script for the standard
+      labels (Synopsis, Platform, Permissions, When to use, Safety).
+    #>
+    param([string]$Path, [string]$CategoryKey, [string]$CategoryName, [string]$Kind)
+
+    $FileName = Split-Path $Path -Leaf
+    $Header = (Get-Content $Path -TotalCount 40 | ForEach-Object { $_ -replace '^\s*#\s?', '' }) -join "`n"
+    $Synopsis = Get-NoteValue $Header "Synopsis:"
+
+    return [PSCustomObject]@{
+        Name = $FileName; Path = $Path
+        RelativePath = $Path.Substring($ScriptRoot.Length + 1) -replace '\\', '/'
+        CategoryKey = $CategoryKey; CategoryName = $CategoryName; Kind = $Kind
+        Description = if ($Synopsis) { $Synopsis } else { $FileName }
+        WhenToUse = Get-NoteValue $Header "When to use:"
+        Permissions = Get-NoteValue $Header "Permissions:"
+        Safety = Get-NoteValue $Header "Safety:"
+        Platform = Get-NoteValue $Header "Platform:"
+        Examples = @()
+        Parameters = @(); Dependencies = @(); RequiresAdmin = $false
+    }
+}
+
 function Parse-ScriptFile {
     <#
     .SYNOPSIS
-      Parses a single .ps1 file using the PowerShell AST to extract:
-      parameters, dependencies, and synopsis. Merges manifest data.
+      Parses a single .ps1 file using the PowerShell AST to extract the header
+      (comment-based help), parameters and dependencies.
     #>
     param(
         [string]$Path,
         [string]$CategoryKey,
-        [string]$CategoryName,
-        [hashtable]$Manifest
+        [string]$CategoryName
     )
 
     $FileName = Split-Path $Path -Leaf
     $RelativePath = $Path.Substring($ScriptRoot.Length + 1) -replace '\\', '/'
 
-    $Description = ""
     $Parameters = @()
     $Dependencies = [System.Collections.Generic.List[string]]::new()
     $RequiresAdmin = $false
@@ -215,27 +230,19 @@ function Parse-ScriptFile {
     } catch {
         return [PSCustomObject]@{
             Name = $FileName; Path = $Path; RelativePath = $RelativePath
-            CategoryKey = $CategoryKey; CategoryName = $CategoryName
-            Description = "Parse failed"; Parameters = @(); Dependencies = @()
-            RequiresAdmin = $false; HasManifest = $false
+            CategoryKey = $CategoryKey; CategoryName = $CategoryName; Kind = "PowerShell"
+            Description = "Parse failed"; WhenToUse = ""; Permissions = ""; Safety = ""; Platform = ""; Examples = @()
+            Parameters = @(); Dependencies = @(); RequiresAdmin = $false
         }
     }
 
-    # ── Extract synopsis from comment-based help ──
-    if ($Ast.EndBlock -and $Ast.EndBlock.Statements) {
-        $FirstStmt = $Ast.EndBlock.Statements[0]
-        if ($FirstStmt -is [System.Management.Automation.Language.AssignmentStatementAst]) {
-            $Val = $FirstStmt.Right
-            if ($Val -is [System.Management.Automation.Language.HashtableAst]) { } # maybe comment help
-        }
-    }
-    # Walk all comment tokens to find .SYNOPSIS
-    # Handles both line comments (# .SYNOPSIS) and block comments (<# .SYNOPSIS #>)
-    foreach ($Token in $Tokens) {
-        if ($Token.Kind -eq "Comment" -and $Token.Text -match '\.SYNOPSIS\s*\n\s*#?\s*(.+?)(?:\r?\n|$)') {
-            $Description = $Matches[1].Trim()
-            break
-        }
+    # ── Header: comment-based help ──
+    $Help = $Ast.GetHelpContent()
+    $Description = ""; $Notes = ""; $Examples = @()
+    if ($Help) {
+        $Description = ($Help.Synopsis -replace '\s*\r?\n\s*', ' ').Trim()
+        $Notes = $Help.Notes
+        $Examples = @($Help.Examples | ForEach-Object { $_.Trim() })
     }
 
     # ── Extract parameters from param() block ──
@@ -252,6 +259,10 @@ function Parse-ScriptFile {
 
             if ($ParamAst.StaticType -and $ParamAst.StaticType.Name) {
                 $ParamType = $ParamAst.StaticType.Name
+            }
+            if ($Help -and $Help.Parameters) {
+                $HelpKey = $Help.Parameters.Keys | Where-Object { $_ -ieq $ParamName } | Select-Object -First 1
+                if ($HelpKey) { $HelpText = ($Help.Parameters[$HelpKey] -replace '\s*\r?\n\s*', ' ').Trim() }
             }
 
             if ($ParamAst.DefaultValue) {
@@ -295,15 +306,12 @@ function Parse-ScriptFile {
     }
 
     # ── Extract dependencies ──
-    # #Requires -Module
-    foreach ($Token in $Tokens) {
-        if ($Token.Kind -eq "Comment" -and $Token.Text -match '#Requires\s+-Module\s+(\S+)') {
-            $ModuleName = $Matches[1]
-            if ($ModuleName -notin $Dependencies) { $Dependencies.Add($ModuleName) }
+    # #Requires -Modules / -RunAsAdministrator (cross-version via ScriptRequirements)
+    if ($Ast.ScriptRequirements) {
+        foreach ($Mod in @($Ast.ScriptRequirements.RequiredModules)) {
+            if ($Mod -and $Mod.Name -and $Mod.Name -notin $Dependencies) { $Dependencies.Add($Mod.Name) }
         }
-        if ($Token.Kind -eq "Comment" -and $Token.Text -match '#Requires\s+-RunAsAdministrator') {
-            $RequiresAdmin = $true
-        }
+        if ($Ast.ScriptRequirements.IsElevationRequired) { $RequiresAdmin = $true }
     }
 
     # Import-Module statements
@@ -327,123 +335,23 @@ function Parse-ScriptFile {
         }
     }
 
-    # ── Merge manifest data ──
-    $HasManifest = $false
-    $ManifestKey = $RelativePath -replace '\\', '/'
-    if ($Manifest.ContainsKey("scripts") -and $Manifest["scripts"].ContainsKey($ManifestKey)) {
-        $Entry = $Manifest["scripts"][$ManifestKey]
-        if ($Entry.description -and -not $Description) { $Description = $Entry.description }
-        $HasManifest = $true
-    }
-    # Also match by filename only
-    if (-not $HasManifest -and $Manifest.ContainsKey("scripts")) {
-        foreach ($Key in $Manifest["scripts"].Keys) {
-            if ($Key -match "$([regex]::Escape($FileName))$") {
-                $Entry = $Manifest["scripts"][$Key]
-                if ($Entry.description -and -not $Description) { $Description = $Entry.description }
-                $HasManifest = $true
-                break
-            }
-        }
-    }
-
     return [PSCustomObject]@{
         Name = $FileName
         Path = $Path
         RelativePath = $RelativePath
         CategoryKey = $CategoryKey
         CategoryName = $CategoryName
+        Kind = "PowerShell"
         Description = if ($Description) { $Description } else { $FileName -replace '\.ps1$', '' -replace '-', ' ' }
+        WhenToUse = Get-NoteValue $Notes "When to use:"
+        Permissions = Get-NoteValue $Notes "Permissions:"
+        Safety = Get-NoteValue $Notes "Safety:"
+        Platform = Get-NoteValue $Notes "Platform:"
+        Examples = $Examples
         Parameters = $Parameters
         Dependencies = $Dependencies.ToArray()
         RequiresAdmin = $RequiresAdmin
-        HasManifest = $HasManifest
     }
-}
-
-function Get-ScriptDescription {
-    <#
-    .SYNOPSIS
-      Extracts the .SYNOPSIS text from a .ps1 file via AST tokens.
-      Falls back to a cleaned filename if no synopsis is found.
-    #>
-    param([string]$Path)
-    try {
-        $Tokens = $null
-        $Errors = $null
-        $null = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$Errors)
-        foreach ($Token in $Tokens) {
-            if ($Token.Kind -eq "Comment" -and $Token.Text -match '\.SYNOPSIS\s*\n\s*#?\s*(.+?)(?:\r?\n|$)') {
-                return $Matches[1].Trim()
-            }
-        }
-    } catch {}
-    $Name = Split-Path $Path -Leaf
-    return $Name -replace '\.ps1$', '' -replace '-', ' '
-}
-
-function Update-ToolboxManifest {
-    <#
-    .SYNOPSIS
-      Scans scripts/windows/ for .ps1 files not yet in toolbox-manifest.json
-      and scaffolds entries using AST-extracted descriptions. Safe to run
-      repeatedly — existing entries are never overwritten.
-    #>
-    $UpdatedManifest = @{ scripts = @{} }
-    $ExistingPaths = @()
-
-    if (Test-Path $ManifestPath) {
-        try {
-            $Existing = Get-Content $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json | ConvertTo-Hashtable
-            if ($Existing.ContainsKey("scripts")) {
-                $UpdatedManifest["scripts"] = $Existing["scripts"]
-                $ExistingPaths = @($Existing["scripts"].Keys)
-            }
-        } catch {
-            Write-Warn "  Could not read existing manifest: $_"
-        }
-    }
-
-    if (-not (Test-Path $ScriptsRoot)) {
-        Write-Err "Scripts root not found: $ScriptsRoot"
-        return
-    }
-
-    $NewCount = 0
-    $SkipCount = 0
-
-    $Folders = Get-ChildItem $ScriptsRoot -Directory | Sort-Object Name
-    foreach ($Folder in $Folders) {
-        $ScriptFiles = Get-ChildItem $Folder -Filter "*.ps1" -File | Sort-Object Name
-        foreach ($File in $ScriptFiles) {
-            $FullPath = $File.FullName
-            $RelativePath = $FullPath.Substring($ScriptRoot.Length + 1) -replace '\\', '/'
-
-            if ($ExistingPaths -contains $RelativePath) {
-                $SkipCount++
-                continue
-            }
-
-            $Description = Get-ScriptDescription -Path $FullPath
-            $UpdatedManifest["scripts"][$RelativePath] = @{
-                description = $Description
-                notes       = "Auto-generated. Review and update."
-                examples    = ".\`"$([System.IO.Path]::GetFileName($FullPath))\`" <parameters>"
-            }
-            $NewCount++
-            Write-Ok "  Added: $RelativePath"
-        }
-    }
-
-    $UpdatedManifest["scripts"] = $UpdatedManifest["scripts"] | ConvertTo-Hashtable
-
-    $Json = $UpdatedManifest | ConvertTo-Json -Depth 10
-    $Json | Out-File $ManifestPath -Encoding UTF8
-
-    Write-Host ""
-    Write-Ok "Manifest: $ManifestPath"
-    Write-Dim "  $NewCount new entries added"
-    Write-Dim "  $SkipCount existing entries preserved"
 }
 
 function Get-ScriptParameterString {
@@ -1124,8 +1032,34 @@ function Show-MainLoop {
             $SelectedScript = $Scripts[$ScriptChoice]
             Write-Host ""
             Show-InfoPane -ScriptInfo $SelectedScript
-            Invoke-ToolboxScript -ScriptInfo $SelectedScript
+            if ($SelectedScript.Kind -eq "PowerShell") {
+                Invoke-ToolboxScript -ScriptInfo $SelectedScript
+            } else {
+                Invoke-ForeignScript -ScriptInfo $SelectedScript
+            }
         }
+    }
+}
+
+function Invoke-ForeignScript {
+    <#
+    .SYNOPSIS
+      Runs (macOS/Linux) or prints (Windows) a bash/Python script with free-text arguments.
+    #>
+    param([PSObject]$ScriptInfo)
+
+    $Interpreter = if ($ScriptInfo.Kind -eq "bash") { "bash" } else { "python3" }
+    $UserArgs = Read-Host "  Arguments (blank for none; see the header above)"
+    $ArgList = if ($UserArgs) { @($UserArgs -split '\s+' | Where-Object { $_ }) } else { @() }
+    $Command = "$Interpreter `"$($ScriptInfo.Path)`" $UserArgs".Trim()
+
+    if ($OnWindows) {
+        Write-Warn "  $($ScriptInfo.Kind) scripts are meant for macOS/Linux. Command to run there:"
+        Write-Host "  $Command"
+    } elseif (Show-YesNo -Prompt "Run now?" -Default $true) {
+        & $Interpreter $ScriptInfo.Path @ArgList
+    } else {
+        Write-Host "  $Command"
     }
 }
 
@@ -1136,6 +1070,13 @@ function Show-InfoPane {
     Write-Rule
     Write-Host "  Selected: $($ScriptInfo.RelativePath)" -ForegroundColor White
     Write-Dim "  $($ScriptInfo.Description)"
+    if ($ScriptInfo.WhenToUse)   { Write-Dim "  When to use:  $($ScriptInfo.WhenToUse)" }
+    if ($ScriptInfo.Permissions) { Write-Dim "  Permissions:  $($ScriptInfo.Permissions)" }
+    if ($ScriptInfo.Safety)      { Write-Dim "  Safety:       $($ScriptInfo.Safety)" }
+    if ($ScriptInfo.Platform)    { Write-Dim "  Platform:     $($ScriptInfo.Platform)" }
+    if ($ScriptInfo.Examples.Count -gt 0) {
+        Write-Dim "  Example:      $(($ScriptInfo.Examples[0] -split '\r?\n')[0])"
+    }
     if ($ScriptInfo.Dependencies.Count -gt 0) {
         Write-Dim "  Dependencies: $($ScriptInfo.Dependencies -join ', ')"
     }
@@ -1148,12 +1089,6 @@ function Show-InfoPane {
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
-
-if ($UpdateManifest) {
-    Write-Host "Updating script manifest..." -ForegroundColor Cyan
-    Update-ToolboxManifest
-    return
-}
 
 Clear-Host
 Show-Banner
