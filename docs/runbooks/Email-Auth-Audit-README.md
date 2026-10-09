@@ -1,7 +1,7 @@
-📧 **EmailAuth-Audit.ps1**
+📧 **Test-EmailAuthentication.ps1**
 
 ## Overview
-EmailAuth-Audit.ps1 is a PowerShell auditing tool designed to assess email authentication posture across one or more domains. It evaluates the presence and configuration of:
+Test-EmailAuthentication.ps1 is a PowerShell auditing tool designed to assess email authentication posture across one or more domains. It evaluates the presence and configuration of:
 
 - **SPF** (Sender Policy Framework)
 - **DKIM** (DomainKeys Identified Mail)
@@ -101,10 +101,11 @@ Example:
 
 2️⃣ **Data Export (Your Choice)**
 
-At runtime, you are prompted to select:
+Choose the format with `-Format`:
 
-- 1 = CSV
-- 2 = Excel (.xlsx)
+- `Csv` (default)
+- `Xlsx` (needs the `ImportExcel` module)
+- `None` (HTML report only)
 
 Export includes:
 
@@ -147,16 +148,14 @@ The script inspects the **rua=mailto:** tag and reports:
 ## Usage
 
 - Update paths in the script:
-  - `$InputCsv`
-  - `$HtmlOutput`
+  - `-InputCsv` (required), `-OutputPath`, `-CustomerName`, `-Format`
 
 - Run the script:
 
 ```powershell
-PowerShell .\EmailAuth-Audit.ps1
+.\Test-EmailAuthentication.ps1 -InputCsv D:\Input\domains.csv -OutputPath D:\Reports -Format Csv
 ```
 
-- Choose export format when prompted
 - Review the generated HTML and data file
 
 ## Intended Use Cases
@@ -180,3 +179,7 @@ PowerShell .\EmailAuth-Audit.ps1
 - DMARC aggregate report ingestion
 - Scheduled audit mode
 - Executive summary export
+
+---
+
+_Generated reference (parameters, permissions, examples): see `docs/scripts/Test-EmailAuthentication.md`._

@@ -1,0 +1,617 @@
+#Requires -Version 5.1
+
+<#
+.SYNOPSIS
+    Windows Event Log Anomaly Parser - detects critical errors and behavioral anomalies
+    across System, Application, and Security logs on local or remote machines.
+
+.DESCRIPTION
+    Parses Windows Event Logs using Get-WinEvent (preferred over Get-EventLog for
+    performance). Filters critical/error-level events, detects anomaly patterns such as
+    burst activity, repeated Event IDs, service crashes, and auth failures, then
+    categorizes and shows results in a console table, with optional CSV and JSON export
+    to the output folder. A log file is always written to the output folder.
+
+.PARAMETER ComputerName
+    One or more target machine names. Defaults to the local machine. Local aliases (the short name, the
+    local FQDN, 'localhost', '.', 127.0.0.1) are treated as the local machine and queried without a remote call.
+
+.PARAMETER HoursBack
+    How many hours back to search. Default is 24.
+
+.PARAMETER Logs
+    Which logs to query: System, Application, Security. Default is System + Application.
+
+.PARAMETER EventIDs
+    Optional array of specific Event IDs to filter on. Leave empty for all critical/error events.
+
+.PARAMETER OutputPath
+    Folder for the log file and any CSV/JSON export. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
+
+.PARAMETER CustomerName
+    Optional. Adds a <OutputPath>\<CustomerName> subfolder.
+
+.PARAMETER ExportCsv
+    Switch. Also writes Get-EventLogAnomaly_<timestamp>.csv to the output folder.
+
+.PARAMETER ExportJson
+    Switch. Also writes Get-EventLogAnomaly_<timestamp>.json to the output folder.
+
+.PARAMETER BurstThreshold
+    Number of errors within BurstWindowMinutes that triggers an anomaly flag. Default: 10.
+
+.PARAMETER BurstWindowMinutes
+    Sliding window (minutes) used to detect error bursts. Default: 5.
+
+.PARAMETER IncludeSummary
+    Switch - if present, prints a summary statistics block at the end.
+
+.EXAMPLE
+    # Local machine, last 24 h, show summary
+    .\Get-EventLogAnomaly.ps1 -IncludeSummary -OutputPath D:\Reports
+
+.EXAMPLE
+    # Three remote servers, last 7 days, export CSV
+    .\Get-EventLogAnomaly.ps1 `
+        -ComputerName SRV01,SRV02,SRV03 `
+        -HoursBack 168 `
+        -Logs System,Application,Security `
+        -OutputPath D:\Reports `
+        -CustomerName Contoso `
+        -ExportCsv `
+        -IncludeSummary
+
+.EXAMPLE
+    # Focus on specific Event IDs
+    .\Get-EventLogAnomaly.ps1 -EventIDs 41,6008,7034,1001 -HoursBack 1 -OutputPath D:\Reports
+
+.NOTES
+    Platform:     Windows (Get-WinEvent; remote targets need Remote Event Log Management firewall rules)
+    Permissions:  Read access to the target Event Logs; the Security log needs elevation or Event Log Readers membership
+    When to use:  After an unexpected reboot, crash or slowdown, or as a routine check for repeated errors, bursts and failed logons across servers.
+    Safety:       Read-only
+    Version:      3.0
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [string[]] $ComputerName = @($env:COMPUTERNAME),
+
+    [ValidateRange(1, 8760)]
+    [int]    $HoursBack          = 24,
+
+    [ValidateSet('System', 'Application', 'Security')]
+    [string[]] $Logs             = @('System', 'Application'),
+
+    [int[]]  $EventIDs           = @(),
+
+    [string] $OutputPath,
+    [string] $CustomerName,
+
+    [switch] $ExportCsv,
+    [switch] $ExportJson,
+
+    [int]    $BurstThreshold     = 10,
+    [int]    $BurstWindowMinutes = 5,
+
+    [switch] $IncludeSummary
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Resolve-OutputPath {
+    param([string]$Path, [string]$CustomerName)
+    if (-not $Path) { $Path = $env:TOOLBOX_REPORT_DIR }
+    if (-not $Path) { $Path = Read-Host 'Output folder for reports' }
+    if (-not $Path) { throw 'An output path is required.' }
+    if ($CustomerName) { $Path = Join-Path $Path $CustomerName }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 's'), $Level, $Message
+    Write-Host $line
+    if ($script:LogFile) { Add-Content -LiteralPath $script:LogFile -Value $line }
+}
+
+$stamp  = Get-Date -Format 'yyyyMMdd_HHmmss'
+$outDir = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
+$script:LogFile = Join-Path $outDir "Get-EventLogAnomaly_$stamp.log"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGION: CONSTANTS & CATEGORY MAPPING
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Well-known Event IDs mapped to human-readable categories.
+# Extend this table to suit your environment.
+$Script:CategoryMap = [ordered]@{
+    # ── System Crash / Kernel ──────────────────────────────────────────────
+    41    = 'System Crash / Kernel'   # Kernel power – unexpected reboot
+    1001  = 'System Crash / Kernel'   # BugCheck (BSOD) recorded
+    6008  = 'System Crash / Kernel'   # Unexpected shutdown
+    6009  = 'System Crash / Kernel'   # OS version at boot (logged after dirty shutdown)
+
+    # ── Application Failures ──────────────────────────────────────────────
+    1000  = 'Application Failure'     # Application error
+    1002  = 'Application Failure'     # Application hang
+    1026  = 'Application Failure'     # .NET Runtime exception
+
+    # ── Service Crashes ───────────────────────────────────────────────────
+    7034  = 'Service Crash'           # Service terminated unexpectedly
+    7031  = 'Service Crash'           # Service terminated; recovery action taken
+    7023  = 'Service Crash'           # Service terminated with error
+    7024  = 'Service Crash'           # Service terminated with service-specific error
+
+    # ── Disk / I/O Errors ─────────────────────────────────────────────────
+    7     = 'Disk / I-O Error'        # Disk error detected by driver
+    11    = 'Disk / I-O Error'        # Driver detected controller error
+    15    = 'Disk / I-O Error'        # Device not ready
+    51    = 'Disk / I-O Error'        # Paging error
+
+    # ── Network / Connectivity ────────────────────────────────────────────
+    4202  = 'Network / Connectivity'  # NIC disconnected
+    4198  = 'Network / Connectivity'  # IP address conflict
+    1014  = 'Network / Connectivity'  # DNS name resolution timeout
+
+    # ── Authentication / Security ─────────────────────────────────────────
+    4625  = 'Authentication / Security'  # Failed logon
+    4648  = 'Authentication / Security'  # Explicit credentials logon
+    4740  = 'Authentication / Security'  # Account locked out
+    4719  = 'Authentication / Security'  # System audit policy changed
+    4964  = 'Authentication / Security'  # Special groups assigned to new logon
+}
+
+# Reverse lookup: category → list of canonical Event IDs for display
+$Script:DefaultCriticalIDs = $Script:CategoryMap.Keys
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGION: HELPER FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Get-EventCategory {
+    <#
+    .SYNOPSIS  Returns the category string for a given Event ID, or 'Uncategorized'.
+    #>
+    param([int] $EventId)
+
+    if ($Script:CategoryMap.Contains($EventId)) {
+        return $Script:CategoryMap[$EventId]
+    }
+    return 'Uncategorized'
+}
+
+function Invoke-BurstDetection {
+    <#
+    .SYNOPSIS
+        Scans a sorted list of timestamps for bursts: N or more events within M minutes.
+    .OUTPUTS
+        HashSet of timestamps (as ticks) that fall inside a burst window.
+    #>
+    param(
+        [datetime[]] $Timestamps,
+        [int]        $Threshold,
+        [int]        $WindowMinutes
+    )
+
+    $burstSet  = [System.Collections.Generic.HashSet[long]]::new()
+    $sorted    = @($Timestamps | Sort-Object)
+    $count     = $sorted.Count
+    $windowTS  = [timespan]::FromMinutes($WindowMinutes)
+
+    for ($i = 0; $i -lt $count; $i++) {
+        $windowEnd = $sorted[$i] + $windowTS
+        $inWindow  = @($sorted[$i])
+
+        for ($j = $i + 1; $j -lt $count; $j++) {
+            if ($sorted[$j] -le $windowEnd) {
+                $inWindow += $sorted[$j]
+            } else { break }
+        }
+
+        if ($inWindow.Count -ge $Threshold) {
+            foreach ($ts in $inWindow) {
+                [void] $burstSet.Add($ts.Ticks)
+            }
+        }
+    }
+    return $burstSet
+}
+
+function New-XPathFilter {
+    <#
+    .SYNOPSIS  Builds an XPath query string for Get-WinEvent — filters by time and level.
+    .NOTES     Filtering at query time is vastly faster than piping to Where-Object.
+    #>
+    param(
+        [datetime] $StartTime,
+        [int[]]    $Ids   = @()
+    )
+
+    # Convert to UTC for WinEvent XPath
+    $utcMs = [System.Xml.XmlConvert]::ToString(
+        $StartTime.ToUniversalTime(),
+        [System.Xml.XmlDateTimeSerializationMode]::Utc
+    )
+
+    # Levels: 1 = Critical, 2 = Error
+    $levelClause = "(Level=1 or Level=2)"
+
+    if ($Ids.Count -gt 0) {
+        $idClause = "(" + (($Ids | ForEach-Object { "EventID=$_" }) -join ' or ') + ")"
+        $filter   = "*[System[$levelClause and $idClause and TimeCreated[@SystemTime>='$utcMs']]]"
+    } else {
+        $filter = "*[System[$levelClause and TimeCreated[@SystemTime>='$utcMs']]]"
+    }
+
+    return $filter
+}
+
+function Invoke-SafeMessage {
+    <#
+    .SYNOPSIS  Returns a trimmed, single-line message string (max 200 chars).
+    #>
+    param([string] $Raw)
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return '(no message)' }
+    $clean = $Raw -replace '\r?\n', ' ' -replace '\s{2,}', ' '
+    return ($clean.Trim()).Substring(0, [Math]::Min($clean.Trim().Length, 200))
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGION: CORE COLLECTION FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Test-LocalComputer {
+    <#
+    .SYNOPSIS
+        Returns $true when a target name refers to this machine (short name, FQDN, localhost, '.', loopback).
+    #>
+    param([string] $Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+
+    $aliases = @($env:COMPUTERNAME, 'localhost', '.', '127.0.0.1', '::1')
+    try {
+        $aliases += [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+    } catch {
+        Write-Verbose "Could not resolve the local FQDN: $($_.Exception.Message)"
+    }
+
+    $target = $Name.Trim()
+    if ($target.Length -gt 1) { $target = $target.TrimEnd('.') }
+    return ($aliases -contains $target)
+}
+
+function Get-CriticalEvents {
+    <#
+    .SYNOPSIS
+        Queries one or more logs on a target machine, returning a list of
+        structured event objects ready for anomaly analysis.
+    #>
+    param(
+        [string]   $TargetComputer,
+        [string[]] $LogNames,
+        [datetime] $StartTime,
+        [int[]]    $FilterIDs
+    )
+
+    $collected = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($logName in $LogNames) {
+
+        Write-Verbose "  [$TargetComputer] Querying log: $logName"
+
+        $xPath = New-XPathFilter -StartTime $StartTime -Ids $FilterIDs
+
+        $queryParams = @{
+            LogName      = $logName
+            FilterXPath  = $xPath
+            ErrorAction  = 'SilentlyContinue'
+        }
+
+        # Add -ComputerName only for remote targets to avoid local permission quirks
+        if (-not (Test-LocalComputer -Name $TargetComputer)) {
+            $queryParams['ComputerName'] = $TargetComputer
+        }
+
+        try {
+            $events = Get-WinEvent @queryParams
+        }
+        catch [System.Exception] {
+            # No events matching filter = benign; other errors are logged
+            if ($_.Exception.Message -notmatch 'No events') {
+                Write-Log "[$TargetComputer][$logName] Query failed: $($_.Exception.Message)" 'WARN'
+            }
+            continue
+        }
+
+        foreach ($evt in $events) {
+            $category = Get-EventCategory -EventId $evt.Id
+            $obj = [PSCustomObject]@{
+                Timestamp    = $evt.TimeCreated
+                MachineName  = $evt.MachineName
+                LogName      = $logName
+                EventID      = $evt.Id
+                Level        = $evt.LevelDisplayName
+                Source       = $evt.ProviderName
+                Message      = Invoke-SafeMessage -Raw $evt.Message
+                Category     = $category
+                AnomalyFlag  = 'No'          # populated later
+            }
+            $collected.Add($obj)
+        }
+    }
+
+    return $collected
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGION: ANOMALY ENRICHMENT FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Add-AnomalyFlags {
+    <#
+    .SYNOPSIS
+        Enriches a flat event list with AnomalyFlag = 'Yes' where patterns are detected:
+          1. Burst: >= BurstThreshold events from the same machine within BurstWindowMinutes
+          2. Repeat: Event ID appears > 5 times on the same machine in the analysis window
+          3. Auth Anomaly: Security category events always flagged
+    #>
+    param(
+        [System.Collections.Generic.List[PSCustomObject]] $Events,
+        [int] $Threshold,
+        [int] $WindowMinutes
+    )
+
+    if ($Events.Count -eq 0) { return $Events }
+
+    # Group by machine for burst detection
+    $byMachine = $Events | Group-Object -Property MachineName
+
+    foreach ($machineGroup in $byMachine) {
+
+        $machineEvents = $machineGroup.Group
+        $timestamps    = $machineEvents | Select-Object -ExpandProperty Timestamp
+
+        # ── Burst Detection ──────────────────────────────────────────────
+        $burstTicks = Invoke-BurstDetection `
+            -Timestamps $timestamps `
+            -Threshold  $Threshold `
+            -WindowMinutes $WindowMinutes
+
+        foreach ($evt in $machineEvents) {
+            if ($burstTicks.Contains($evt.Timestamp.Ticks)) {
+                $evt.AnomalyFlag = 'Yes'
+            }
+        }
+
+        # ── Repeat Detection (same EventID > 5 occurrences per machine) ──
+        $idGroups = $machineEvents | Group-Object -Property EventID |
+                    Where-Object { $_.Count -gt 5 }
+
+        foreach ($grp in $idGroups) {
+            foreach ($evt in $grp.Group) {
+                $evt.AnomalyFlag = 'Yes'
+            }
+        }
+    }
+
+    # ── Auth Anomaly: always flag security category events ────────────────
+    foreach ($evt in $Events) {
+        if ($evt.Category -eq 'Authentication / Security') {
+            $evt.AnomalyFlag = 'Yes'
+        }
+    }
+
+    return $Events
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGION: SUMMARY STATISTICS FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Write-SummaryReport {
+    param(
+        [PSCustomObject[]] $Events,
+        [int] $HoursBack
+    )
+
+    $total      = $Events.Count
+    $anomalies  = @($Events | Where-Object { $_.AnomalyFlag -eq 'Yes' }).Count
+    $startLabel = (Get-Date).AddHours(-$HoursBack).ToString('yyyy-MM-dd HH:mm')
+    $endLabel   = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+
+    Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+    Write-Host "  EVENT LOG ANOMALY PARSER — SUMMARY REPORT" -ForegroundColor Cyan
+    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+    Write-Host "  Analysis Window : $startLabel  →  $endLabel"
+    Write-Host "  Total Events    : $total"
+    Write-Host "  Anomaly Flagged : $anomalies" -ForegroundColor $(if ($anomalies -gt 0) {'Yellow'} else {'Green'})
+    Write-Host ""
+
+    # ── Errors by Category ───────────────────────────────────────────────
+    Write-Host "  BY CATEGORY:" -ForegroundColor Cyan
+    $Events | Group-Object -Property Category |
+        Sort-Object Count -Descending |
+        ForEach-Object {
+            $bar   = '█' * [Math]::Min($_.Count, 40)
+            $color = if ($_.Count -ge 10) { 'Red' } elseif ($_.Count -ge 5) { 'Yellow' } else { 'White' }
+            Write-Host ("  {0,-35} {1,4}  {2}" -f $_.Name, $_.Count, $bar) -ForegroundColor $color
+        }
+
+    Write-Host ""
+
+    # ── Errors by Host ───────────────────────────────────────────────────
+    Write-Host "  BY HOST:" -ForegroundColor Cyan
+    $Events | Group-Object -Property MachineName |
+        Sort-Object Count -Descending |
+        ForEach-Object {
+            Write-Host ("  {0,-30} {1,4} events" -f $_.Name, $_.Count)
+        }
+
+    Write-Host ""
+
+    # ── Top 10 Recurring Event IDs ────────────────────────────────────────
+    Write-Host "  TOP RECURRING EVENT IDs:" -ForegroundColor Cyan
+    $Events | Group-Object -Property EventID |
+        Sort-Object Count -Descending |
+        Select-Object -First 10 |
+        ForEach-Object {
+            $cat = Get-EventCategory -EventId ([int]$_.Name)
+            Write-Host ("  EventID {0,-6}  Count: {1,-5}  [{2}]" -f $_.Name, $_.Count, $cat)
+        }
+
+    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`n" -ForegroundColor Cyan
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGION: EXPORT FUNCTIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Export-ToCsv {
+    param(
+        [PSCustomObject[]] $Events,
+        [string]           $Path
+    )
+    try {
+        $Events | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8 -Force
+        Write-Log "CSV written: $Path"
+    }
+    catch {
+        Write-Log "CSV export failed: $($_.Exception.Message)" 'WARN'
+    }
+}
+
+function Export-ToJson {
+    param(
+        [PSCustomObject[]] $Events,
+        [string]           $Path
+    )
+    try {
+        # Format timestamps as ISO-8601 strings for JSON portability
+        $jsonReady = $Events | ForEach-Object {
+            [PSCustomObject]@{
+                Timestamp   = $_.Timestamp.ToString('o')   # ISO-8601
+                MachineName = $_.MachineName
+                LogName     = $_.LogName
+                EventID     = $_.EventID
+                Level       = $_.Level
+                Source      = $_.Source
+                Message     = $_.Message
+                Category    = $_.Category
+                AnomalyFlag = $_.AnomalyFlag
+            }
+        }
+        $jsonReady | ConvertTo-Json -Depth 3 |
+            Set-Content -LiteralPath $Path -Encoding UTF8 -Force
+        Write-Log "JSON written: $Path"
+    }
+    catch {
+        Write-Log "JSON export failed: $($_.Exception.Message)" 'WARN'
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGION: MAIN EXECUTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Invoke-EventLogAnomalyParser {
+    <#
+    .SYNOPSIS  Orchestrates collection, enrichment, display, and export.
+    #>
+
+    $startTime  = (Get-Date).AddHours(-$HoursBack)
+    $filterIDs  = if ($EventIDs.Count -gt 0) { $EventIDs } else { @() }
+    $allEvents  = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    Write-Log 'Event Log Anomaly Parser starting...'
+    Write-Log "Targets: $($ComputerName -join ', ')"
+    Write-Log "Logs: $($Logs -join ', ')"
+    Write-Log "Window: last $HoursBack hour(s) (from $($startTime.ToString('yyyy-MM-dd HH:mm')))"
+    Write-Log "Burst: >= $BurstThreshold events within $BurstWindowMinutes minute(s)"
+
+    foreach ($computer in $ComputerName) {
+
+        Write-Log "Collecting from: $computer"
+
+        try {
+            $machineEvents = @(Get-CriticalEvents `
+                -TargetComputer $computer `
+                -LogNames       $Logs `
+                -StartTime      $startTime `
+                -FilterIDs      $filterIDs)
+
+            Write-Log "Found $($machineEvents.Count) critical/error event(s) on $computer."
+            foreach ($machineEvent in $machineEvents) { $allEvents.Add($machineEvent) }
+        }
+        catch {
+            Write-Log "Failed to collect from [$computer]: $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    if ($allEvents.Count -eq 0) {
+        Write-Log 'No critical/error events found in the specified window.'
+        return
+    }
+
+    # ── Anomaly enrichment ────────────────────────────────────────────────
+    Write-Log 'Running anomaly detection...'
+    $enriched = Add-AnomalyFlags `
+        -Events        $allEvents `
+        -Threshold     $BurstThreshold `
+        -WindowMinutes $BurstWindowMinutes
+
+    # Sort by timestamp descending for readability
+    $sorted = @($enriched | Sort-Object Timestamp -Descending)
+
+    # ── Console table output ──────────────────────────────────────────────
+    Write-Log "Results: $($sorted.Count) event(s) | Anomaly-flagged: $(@($sorted | Where-Object {$_.AnomalyFlag -eq 'Yes'}).Count)"
+
+    $sorted | Format-Table -AutoSize -Property @(
+        @{Label='Timestamp';    Expression={$_.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')}; Width=20}
+        @{Label='Machine';      Expression={$_.MachineName}; Width=20}
+        @{Label='Log';          Expression={$_.LogName}; Width=12}
+        @{Label='EventID';      Expression={$_.EventID}; Width=8}
+        @{Label='Level';        Expression={$_.Level}; Width=10}
+        @{Label='Category';     Expression={$_.Category}; Width=28}
+        @{Label='Anomaly';      Expression={$_.AnomalyFlag}; Width=8}
+        @{Label='Source';       Expression={$_.Source}; Width=30}
+        @{Label='Message';      Expression={$_.Message.Substring(0,[Math]::Min($_.Message.Length,80))}}
+    )
+
+    # ── Anomaly-only highlighted table ────────────────────────────────────
+    $anomalyEvents = $sorted | Where-Object { $_.AnomalyFlag -eq 'Yes' }
+    if ($anomalyEvents) {
+        Write-Host "`n[!] ANOMALY-FLAGGED EVENTS:" -ForegroundColor Red
+        $anomalyEvents | Format-Table -AutoSize -Property @(
+            @{Label='Timestamp';  Expression={$_.Timestamp.ToString('yyyy-MM-dd HH:mm:ss')}; Width=20}
+            @{Label='Machine';    Expression={$_.MachineName}; Width=20}
+            @{Label='EventID';    Expression={$_.EventID}; Width=8}
+            @{Label='Category';   Expression={$_.Category}; Width=28}
+            @{Label='Source';     Expression={$_.Source}; Width=30}
+            @{Label='Message';    Expression={$_.Message.Substring(0,[Math]::Min($_.Message.Length,90))}}
+        )
+    }
+
+    # ── Summary block ─────────────────────────────────────────────────────
+    if ($IncludeSummary) {
+        Write-SummaryReport -Events $sorted -HoursBack $HoursBack
+    }
+
+    # ── Export ────────────────────────────────────────────────────────────
+    if ($ExportCsv)  { Export-ToCsv  -Events $sorted -Path (Join-Path $outDir "Get-EventLogAnomaly_$stamp.csv")  }
+    if ($ExportJson) { Export-ToJson -Events $sorted -Path (Join-Path $outDir "Get-EventLogAnomaly_$stamp.json") }
+
+    # Return the enriched objects to the pipeline for further processing
+    return $sorted
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+Invoke-EventLogAnomalyParser

@@ -48,7 +48,7 @@ Designed for:
 | **Structured findings report** | Separate CSV with `RuleId`, `Severity`, `Finding`, and `Recommendation` |
 | **Console summary dashboard** | Live counts by state, MFA coverage %, and findings by severity |
 | **Least-privilege auth** | Uses `Policy.Read.All` only — no write permissions required |
-| **Auto module install** | Installs `Microsoft.Graph.Identity.SignIns` automatically if missing |
+| **Module check** | Stops with the install command if `Microsoft.Graph.Identity.SignIns` is missing |
 | **No legacy modules** | Zero dependency on deprecated `AzureAD` or `MSOnline` cmdlets |
 | **Automation-ready** | `-SkipConnect` flag supports Managed Identity and service principal contexts |
 
@@ -57,48 +57,38 @@ Designed for:
 ## 📦 Prerequisites
 
 - **PowerShell** 5.1 or later (PowerShell 7+ recommended)
-- **Internet access** to PSGallery (for auto-install) and Microsoft Graph endpoints
+- **Internet access** to Microsoft Graph endpoints (and PSGallery to install the module)
 - A Microsoft Entra account with sufficient permissions (see [Permissions](#-permissions))
 
-The script will automatically install the required module if it is not present:
+The script stops with an install command if the required module is missing:
 
-```
-Microsoft.Graph.Identity.SignIns
+```powershell
+Install-Module Microsoft.Graph.Identity.SignIns -Scope CurrentUser
 ```
 
 ---
 
 ## 🚀 Installation
 
-Clone the repository or download the script directly:
-
-```bash
-git clone https://github.com/your-org/entra-ca-auditor.git
-cd entra-ca-auditor
-```
-
-Or download the script file directly:
-
-```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/your-org/entra-ca-auditor/main/Audit-ConditionalAccess.ps1" `
-                  -OutFile "Audit-ConditionalAccess.ps1"
-```
+The script lives in this repo at `scripts/windows/m365/Get-ConditionalAccessReport.ps1`. Copy that one file to the machine you run it from; it has no other dependencies.
 
 ---
 
 ## 💻 Usage
 
-### Basic — Interactive login, output to script directory
+### Basic — Interactive login
 
 ```powershell
-.\Audit-ConditionalAccess.ps1
+.\Get-ConditionalAccessReport.ps1 -OutputPath D:\Reports
 ```
+
+(`-OutputPath` can be omitted if `$env:TOOLBOX_REPORT_DIR` is set; otherwise you are prompted. Add `-CustomerName Contoso` for a per-customer subfolder.)
 
 ### Specify tenant ID and custom output folder
 
 ```powershell
-.\Audit-ConditionalAccess.ps1 -TenantId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" `
-                               -OutputPath "C:\CAReports"
+.\Get-ConditionalAccessReport.ps1 -TenantId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" `
+                               -OutputPath "D:\Reports"
 ```
 
 ### Automation — Use a pre-authenticated context (Managed Identity / service principal)
@@ -106,14 +96,14 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/your-org/entra-ca-audi
 ```powershell
 # Authenticate externally first, then skip the Connect step
 Connect-MgGraph -Identity   # or Connect-MgGraph -ClientSecretCredential ...
-.\Audit-ConditionalAccess.ps1 -SkipConnect -OutputPath "C:\CAReports"
+.\Get-ConditionalAccessReport.ps1 -SkipConnect -OutputPath "D:\Reports"
 ```
 
 ### Parameters
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `-OutputPath` | `string` | No | Script directory | Folder where all output files are written |
+| `-OutputPath` | `string` | No | `$env:TOOLBOX_REPORT_DIR`, else prompt | Folder where all output files are written |
 | `-TenantId` | `string` | No | *(prompts)* | Entra tenant ID for authentication |
 | `-SkipConnect` | `switch` | No | `false` | Skip `Connect-MgGraph` and use existing context |
 
@@ -123,7 +113,7 @@ Connect-MgGraph -Identity   # or Connect-MgGraph -ClientSecretCredential ...
 
 Three files are produced in the output directory:
 
-### `CA-Policies.json`
+### `Get-ConditionalAccessReport_<timestamp>.json`
 Full raw Graph API response for every policy, serialized at depth 10. Suitable for archival, diffing between audit runs, or feeding into downstream tooling (Sentinel, Splunk, etc.).
 
 ```json
@@ -140,13 +130,13 @@ Full raw Graph API response for every policy, serialized at depth 10. Suitable f
 ]
 ```
 
-### `CA-Policies.csv`
+### `Get-ConditionalAccessReport_<timestamp>.csv`
 One row per policy with all nested fields flattened into columns. Named Location GUIDs are resolved to display names. Ready to open directly in Excel or import into a SIEM.
 
 **Columns include:**
 `PolicyId` · `DisplayName` · `State` · `IncludeUsers` · `ExcludeUsers` · `IncludeGroups` · `ExcludeGroups` · `IncludeApplications` · `IncludeLocations` · `IncludePlatforms` · `SignInRiskLevels` · `UserRiskLevels` · `GrantBuiltInControls` · `GrantOperator` · `SessionSignInFrequencyValue` · `CreatedDateTime` · `ModifiedDateTime` · *(and more)*
 
-### `CA-RiskyFindings.csv`
+### `Get-ConditionalAccessReport_<timestamp>_Findings.csv`
 One row per finding, sorted **High → Medium → Low**, then by policy name.
 
 | Column | Description |
@@ -217,7 +207,7 @@ Console summary dashboard printed at completion:
 ───────────────────────────────────────────────────────
 ```
 
-Sample row from `CA-RiskyFindings.csv`:
+Sample row from `Get-ConditionalAccessReport_<timestamp>_Findings.csv`:
 
 | PolicyName | RuleId | Severity | Finding | Recommendation |
 |---|---|---|---|---|
