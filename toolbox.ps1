@@ -480,6 +480,7 @@ function Test-InteractiveTerminal {
     if ($host.Name -like "*ISE*") { return $false }
     if ($host.Name -like "*VS Code*") { return $false }
     if (-not [Environment]::UserInteractive) { return $false }
+    try { if ([Console]::IsInputRedirected) { return $false } } catch { return $false }
     return $true
 }
 
