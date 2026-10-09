@@ -8,7 +8,7 @@ Reports Windows Update patch compliance for one or more servers as an HTML repor
 Queries the Windows Update Agent install history on each computer and finds the most recent successful
 update. A server is Compliant when that update is no more than -DaysSinceLastUpdate days old, Out of Date
 when older, and Never Updated when no successful install is found. Optionally checks for a pending reboot
-and for specific KB numbers in the history (the KB results are collected but not shown in the HTML or CSV).
+and for specific KB numbers in the history (shown in the KB Check column of the HTML and CSV).
 The report is an HTML table with a summary header. A log file is also written.
 
 .PARAMETER ComputerName
@@ -27,11 +27,12 @@ Also write a CSV of the results next to the HTML report.
 Maximum age in days of the last successful update for a server to count as Compliant. Default: 30.
 
 .PARAMETER KbIds
-Optional KB identifiers (for example KB5030211) to look for in the update history.
+Optional KB identifiers (for example KB5030211) to look for in the update history. The result per KB
+(date found, or Not found) is written to the KB Check column of the HTML and CSV.
 
 .PARAMETER IncludeRebootStatus
-Check the registry for a pending reboot on the local machine and set the PendingReboot column.
-Note: the registry check runs on the machine running the script, not on remote targets.
+Check the registry on each target for a pending reboot (remote targets are queried with Invoke-Command, which
+needs WinRM) and set the PendingReboot column. If the check fails for a target, PendingReboot is left blank.
 
 .EXAMPLE
 .\Get-PatchComplianceReport.ps1 -OutputPath D:\Reports
@@ -108,10 +109,12 @@ function Get-PatchStatus {
         return $null
     }
 
+    $HistoryCount = 0
     try {
         $HistoryCount = $Searcher.GetTotalHistoryCount()
         $History = $Searcher.QueryHistory(0, $HistoryCount) | Select-Object -Last 100
     } catch {
+        Write-Log "Cannot read update history on ${ComputerName}: $($_.Exception.Message)" 'WARN'
         $History = @()
     }
 
@@ -138,24 +141,36 @@ function Get-PatchStatus {
 
     $PendingReboot = $false
     if ($IncludeRebootStatus) {
+        $RebootCheck = {
+            (Test-Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') -or
+            (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+        }
         try {
-            $RebootKey = Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" -ErrorAction SilentlyContinue
-            $CBSReboot = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" -ErrorAction SilentlyContinue
-            if ($RebootKey -or $CBSReboot) { $PendingReboot = $true }
-        } catch { }
+            if ($ComputerName -in @($env:COMPUTERNAME, 'localhost', '.')) {
+                $PendingReboot = [bool](& $RebootCheck)
+            } else {
+                $PendingReboot = [bool](Invoke-Command -ComputerName $ComputerName -ScriptBlock $RebootCheck)
+            }
+        } catch {
+            Write-Log "Cannot check pending reboot on ${ComputerName}: $($_.Exception.Message)" 'WARN'
+            $PendingReboot = $null
+        }
     }
 
     $SpecificUpdates = @()
     if ($KbIds) {
         foreach ($Kb in $KbIds) {
-            $Found = $History | Where-Object { $_.Title -match $Kb }
+            $Found = @($History | Where-Object { $_.Title -match $Kb })
             $SpecificUpdates += [PSCustomObject]@{
                 KB      = $Kb
                 Found   = ($Found.Count -gt 0)
-                Date    = if ($Found) { ($Found | Sort-Object Date -Descending | Select-Object -First 1).Date } else { $null }
+                Date    = if ($Found.Count -gt 0) { ($Found | Sort-Object Date -Descending | Select-Object -First 1).Date } else { $null }
             }
         }
     }
+    $KbCheck = (@($SpecificUpdates | ForEach-Object {
+        if ($_.Found) { '{0}: {1}' -f $_.KB, $_.Date } else { '{0}: Not found' -f $_.KB }
+    })) -join '; '
 
     return [PSCustomObject]@{
         ComputerName     = $ComputerName.ToUpper()
@@ -166,6 +181,7 @@ function Get-PatchStatus {
         TotalUpdates     = $HistoryCount
         PendingReboot    = $PendingReboot
         SpecificUpdates  = $SpecificUpdates
+        KbCheck          = $KbCheck
     }
 }
 
@@ -208,6 +224,7 @@ $HtmlRows = $AllResults | Sort-Object Compliance, ComputerName | ForEach-Object 
         <td>$($_.LastUpdateTitle)</td>
         <td>$($_.TotalUpdates)</td>
         <td>$($_.PendingReboot)</td>
+        <td>$($_.KbCheck)</td>
     </tr>"
 }
 
@@ -236,7 +253,7 @@ td { padding: 5px 8px; border-bottom: 1px solid #ddd; }
     <strong>Compliance Window:</strong> $DaysSinceLastUpdate days
 </div>
 <table>
-<tr><th>Server</th><th>Status</th><th>Last Update</th><th>Days Ago</th><th>Last KB</th><th>Total Updates</th><th>Reboot Pending</th></tr>
+<tr><th>Server</th><th>Status</th><th>Last Update</th><th>Days Ago</th><th>Last KB</th><th>Total Updates</th><th>Reboot Pending</th><th>KB Check</th></tr>
 $($HtmlRows -join "`n")
 </table>
 </body></html>
@@ -246,7 +263,7 @@ $Html | Out-File -LiteralPath $htmlPath -Encoding UTF8
 Write-Log "Report written: $htmlPath"
 
 if ($ExportCsv) {
-    $CsvData = $AllResults | Select-Object ComputerName, Compliance, LastInstallDate, DaysSinceUpdate, LastUpdateTitle, TotalUpdates, PendingReboot
+    $CsvData = $AllResults | Select-Object ComputerName, Compliance, LastInstallDate, DaysSinceUpdate, LastUpdateTitle, TotalUpdates, PendingReboot, KbCheck
     $CsvData | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
     Write-Log "CSV written: $csvPath"
 }
