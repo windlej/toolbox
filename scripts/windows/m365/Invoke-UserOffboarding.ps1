@@ -10,8 +10,7 @@ For each user from a CSV or a list of user principal names, the script always bl
 AccountEnabled to false) and then runs the optional steps you ask for: revoke refresh tokens and sign-in
 sessions (-RevokeSessions), remove all assigned licenses (-RemoveLicenses), convert the mailbox to a shared
 mailbox (-ConvertToSharedMailbox, Exchange Online) and set mailbox forwarding (-ForwardTo, Exchange Online).
-It also looks up the user's OneDrive and manager and records the result; note that the OneDrive step currently
-only reports what it found and does not change retention or permissions. Every state-changing call honours
+It does not change OneDrive retention or access; handle those separately. Every state-changing call honours
 -WhatIf and -Confirm. The output is an HTML report with one row per operation (user, action, status, detail,
 timestamp) and a log file.
 
@@ -26,12 +25,6 @@ Folder for the report and log. Falls back to $env:TOOLBOX_REPORT_DIR, then promp
 
 .PARAMETER CustomerName
 Optional. Adds a <OutputPath>\<CustomerName> subfolder.
-
-.PARAMETER ManagerCsvPath
-Optional INPUT file: CSV with User and Manager columns used to name the OneDrive delegate. Falls back to the manager in Entra ID.
-
-.PARAMETER OneDriveRetentionDays
-Reserved for the OneDrive retention period. Currently has no effect. Default 30.
 
 .PARAMETER RevokeSessions
 Also revoke the users' refresh tokens and sign-in sessions.
@@ -56,10 +49,10 @@ Skip Connect-MgGraph (use when a Graph session with suitable scopes already exis
 
 .NOTES
 Platform:     Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK; ExchangeOnlineManagement for mailbox steps)
-Permissions:  Graph scopes requested at sign-in: User.ReadWrite.All, Directory.ReadWrite.All, MailboxSettings.ReadWrite, Sites.FullControl.All, Files.ReadWrite.All (User Administrator, plus License Administrator for -RemoveLicenses); Exchange Online Recipient Management or Exchange Administrator for mailbox steps
+Permissions:  Graph scopes requested at sign-in: User.ReadWrite.All, Directory.ReadWrite.All, MailboxSettings.ReadWrite (User Administrator, plus License Administrator for -RemoveLicenses); Exchange Online Recipient Management or Exchange Administrator for mailbox steps
 When to use:  Departing employees or contractors, when access must be cut off and the mailbox preserved.
 Safety:       Destructive (supports -WhatIf)
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Manual')]
 param(
@@ -72,10 +65,6 @@ param(
     [string]$OutputPath,
 
     [string]$CustomerName,
-
-    [string]$ManagerCsvPath,
-
-    [int]$OneDriveRetentionDays = 30,
 
     [switch]$RevokeSessions,
 
@@ -138,9 +127,7 @@ function Connect-ToGraph {
     $scopes = @(
         'User.ReadWrite.All',
         'Directory.ReadWrite.All',
-        'MailboxSettings.ReadWrite',
-        'Sites.FullControl.All',
-        'Files.ReadWrite.All'
+        'MailboxSettings.ReadWrite'
     )
     try {
         Connect-MgGraph -Scopes $scopes -NoWelcome -ErrorAction Stop
@@ -164,51 +151,6 @@ function Connect-ToExchange {
     } catch {
         Write-Result -User '' -Action 'ExchangeOnline' -Status 'Failed' -Detail $_.Exception.Message
         return $false
-    }
-}
-
-function Get-ManagerForUser {
-    param([string]$UserPrincipalName)
-    if (-not $ManagerCsvPath -or -not (Test-Path -LiteralPath $ManagerCsvPath)) { return $null }
-    $ManagerMap = @(Import-Csv -LiteralPath $ManagerCsvPath)
-    $Entry = $ManagerMap | Where-Object { $_.User -eq $UserPrincipalName }
-    if ($Entry) { return $Entry.Manager }
-    return $null
-}
-
-function Set-OneDriveRetention {
-    param([string]$UserPrincipalName)
-
-    try {
-        $User = Get-MgUser -UserId $UserPrincipalName -Property Id, DisplayName -ErrorAction Stop
-        $OneDrive = Get-MgUserDrive -UserId $UserPrincipalName -ErrorAction SilentlyContinue
-        if (-not $OneDrive) {
-            Write-Result -User $UserPrincipalName -Action 'OneDriveRetention' -Status 'Skipped' -Detail 'No OneDrive found'
-            return
-        }
-
-        $Manager = Get-ManagerForUser -UserPrincipalName $UserPrincipalName
-        if (-not $Manager) {
-            try {
-                $Mgmt = Get-MgUserManager -UserId $UserPrincipalName -ErrorAction SilentlyContinue
-                if ($Mgmt -and $Mgmt.AdditionalProperties.ContainsKey('userPrincipalName')) {
-                    $Manager = $Mgmt.AdditionalProperties['userPrincipalName']
-                }
-            } catch {
-                Write-Log "  Manager lookup failed for $UserPrincipalName : $_" 'WARN'
-            }
-        }
-
-        if ($Manager) {
-            Write-Result -User $UserPrincipalName -Action 'OneDriveRetention' -Status 'Success' -Detail "OneDrive retention set. Delegated to: $Manager"
-            Write-Log "  OneDrive delegated to $Manager"
-        } else {
-            Write-Result -User $UserPrincipalName -Action 'OneDriveRetention' -Status 'Warning' -Detail 'OneDrive retention set but no manager found for delegation'
-            Write-Log '  OneDrive retention applied (no manager for delegation)' 'WARN'
-        }
-    } catch {
-        Write-Result -User $UserPrincipalName -Action 'OneDriveRetention' -Status 'Failed' -Detail $_.Exception.Message
-        Write-Log "  OneDrive retention failed: $_" 'WARN'
     }
 }
 
@@ -353,8 +295,6 @@ try {
         if ($RemoveLicenses) {
             Remove-UserLicenses -UserPrincipalName $UPN
         }
-
-        Set-OneDriveRetention -UserPrincipalName $UPN
 
         if ($ExchangeConnected -and $ConvertToSharedMailbox) {
             Convert-UserToSharedMailbox -UserPrincipalName $UPN
