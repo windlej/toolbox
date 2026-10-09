@@ -21,15 +21,15 @@ Recursively enumerates the user members of a list of privileged groups (Domain A
 Schema Admins, Administrators and others by default) and writes an HTML report with each member's enabled state,
 title, department, password and logon dates, flagging disabled accounts and accounts whose password never expires.
 -UpdateBaseline saves the current membership to a baseline XML file; -CompareWithBaseline loads that file and
-lists members who were Added or Removed since it was taken. -AlertEmailTo sends the change list by e-mail
-(Send-MailMessage). Active Directory is never modified; the only things written are the report, the log and,
-with -UpdateBaseline, the baseline file.
+lists members who were Added or Removed since it was taken.
+Active Directory is never modified; the only things written are the report, the log and, with -UpdateBaseline,
+the baseline file.
 
 The baseline is persistent state with a fixed file name (Get-PrivilegedGroupChange_Baseline.xml) inside the
 resolved output folder. To compare against an earlier baseline you MUST reuse the same -OutputPath and
 -CustomerName on every run (or pass the same explicit -BaselinePath). Typical routine: run once with
--UpdateBaseline, then run on a schedule with -CompareWithBaseline. Note that using both switches in one run
-saves the new baseline first, so the comparison will then show no changes.
+-UpdateBaseline, then run on a schedule with -CompareWithBaseline. Using both switches in one run compares
+against the existing baseline first and only then saves the current membership as the new baseline.
 
 ## Parameters
 
@@ -39,11 +39,8 @@ saves the new baseline first, so the comparison will then show no changes.
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. Reuse the same value between runs. |
 | `-ProtectedGroups` | String[] | No | Names of the groups to monitor. Defaults to the common built-in privileged groups. |
 | `-BaselinePath` | String | No | Optional full path to the baseline XML file. Default is &lt;output folder&gt;\Get-PrivilegedGroupChange_Baseline.xml. |
-| `-UpdateBaseline` | SwitchParameter | No | Save the current membership as the baseline (overwrites the existing baseline file). Supports -WhatIf. |
+| `-UpdateBaseline` | SwitchParameter | No | Save the current membership as the baseline (overwrites the existing baseline file). Supports -WhatIf. When combined with -CompareWithBaseline, the comparison runs against the old baseline before it is replaced. |
 | `-CompareWithBaseline` | SwitchParameter | No | Compare current membership with the baseline file and report Added/Removed members. |
-| `-AlertEmailTo` | String[] | No | Optional recipients for an e-mail alert when changes are detected. Supports -WhatIf. |
-| `-SmtpServer` | String | No | SMTP server used for the alert e-mail. Default localhost. |
-| `-SmtpPort` | Int32 | No | SMTP port used for the alert e-mail. Default 25. |
 
 ## Examples
 
@@ -52,6 +49,10 @@ saves the new baseline first, so the comparison will then show no changes.
 ```
 
 ```powershell
-.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -OutputPath D:\Reports -CustomerName Contoso -AlertEmailTo secops@contoso.com -SmtpServer smtp.contoso.com
+.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -OutputPath D:\Reports -CustomerName Contoso
+```
+
+```powershell
+.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -UpdateBaseline -OutputPath D:\Reports -CustomerName Contoso
 ```
 

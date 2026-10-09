@@ -31,7 +31,6 @@ one row per assignment, plus an optional CSV of the same data. This script is re
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the assignments to a CSV next to the HTML report. |
 | `-IncludePimEligible` | SwitchParameter | No | Also query PIM eligible role assignments (requires Entra ID P2 licensing). |
-| `-IncludePermanent` | SwitchParameter | No | Reserved. Permanent assignments are always included; this switch currently has no effect. |
 | `-SkipGraphConnect` | SwitchParameter | No | Skip Connect-MgGraph (use when a Graph session with suitable scopes already exists). |
 
 ## Examples

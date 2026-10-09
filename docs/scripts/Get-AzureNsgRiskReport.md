@@ -22,7 +22,8 @@ Each rule is flagged when it allows traffic from any source, to any destination,
 protocol, and is rated Low / Medium / High / Critical (Critical = inbound allow from Internet/any to all ports).
 Default platform rules are skipped unless -IncludeDefaultRules is used.
 
-Output is an HTML report (primary) with a summary and one row per rule, plus an optional CSV of the same data.
+Output is an HTML report (primary) with a summary and one row per rule, sorted by severity (Critical, High,
+Medium, Low) then rule priority, plus an optional CSV of the same data.
 With -FlagHighRiskOnly only rules rated above Low are included. The script makes no changes to Azure.
 
 ## Parameters

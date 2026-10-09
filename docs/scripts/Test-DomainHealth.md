@@ -19,7 +19,7 @@ Start of an engagement, after a DC migration or outage, or as a routine domain h
 
 For each domain controller (all DCs in the domain, or those given in -DomainControllers) the script checks
 connectivity (ping), the Netlogon service, dcdiag results (unless -SkipDcdiag), replication status via
-repadmin /showrepl (unless -SkipReplication), NTP source via w32tm and FSMO role holders. The HTML report
+repadmin /showrepl (unless -SkipReplication), NTP source via w32tm. FSMO role holders are domain/forest-wide, so they are reported once (as a "(domain)" row) rather than per DC. The HTML report
 shows the domain and forest mode, the DC list, summary counts and one row per check coloured by Pass, Warn or
 Fail. Requires dcdiag, repadmin and w32tm on the machine running the script (installed with the AD DS RSAT tools).
 

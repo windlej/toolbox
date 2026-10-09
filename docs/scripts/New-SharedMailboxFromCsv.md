@@ -20,7 +20,7 @@ Provisioning many shared mailboxes at once, for example during onboarding or a t
 Reads a CSV with the columns DisplayName, Alias, Domain, Users and Department (Users may hold several delegates
 separated by ';'; Department is optional). For each row it creates a shared mailbox <Alias>@<Domain> with New-Mailbox
 (delegates are also set as SendOnBehalf). Optional switches then grant each delegate FullAccess (with automapping),
-SendAs, and/or add them as members of a distribution group named after the mailbox. -HideFromGAL hides the new
+SendAs, and/or add them as members of the existing distribution group <Alias>-Members. -HideFromGAL hides the new
 mailbox from address lists.
 
 Nothing is changed unless the script is run for real; use -WhatIf to preview every create/grant without making
@@ -34,7 +34,7 @@ output folder.
 | `-CsvPath` | String | Yes | Input CSV with the columns DisplayName, Alias, Domain, Users, Department. |
 | `-OutputPath` | String | No | Folder for the report and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
-| `-AddUsersAsMembers` | SwitchParameter | No | Add each delegate as a member of a distribution group with the same identity as the mailbox. |
+| `-AddUsersAsMembers` | SwitchParameter | No | Add each delegate as a member of the existing distribution group named &lt;Alias&gt;-Members (a group cannot share the mailbox's own alias or address). The group is not created; if it does not exist the add is recorded as Failed. |
 | `-GrantFullAccess` | SwitchParameter | No | Grant each delegate FullAccess (automapping on) on the new mailbox. |
 | `-GrantSendAs` | SwitchParameter | No | Grant each delegate SendAs on the new mailbox. |
 | `-HideFromGAL` | SwitchParameter | No | Hide the new mailbox from the global address list. |

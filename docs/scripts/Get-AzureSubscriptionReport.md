@@ -29,11 +29,10 @@ column set. The script makes no changes to Azure.
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `-SubscriptionIds` | String[] | No | Currently not applied: the script audits every accessible subscription regardless of this value. |
+| `-SubscriptionIds` | String[] | No | Optional. Limit the audit to these subscription IDs. Default is every subscription the account can see. An ID that is not visible to the account is logged as a warning and skipped. |
 | `-OutputPath` | String | No | Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the full result set to a CSV next to the HTML report. |
-| `-IncludeSpending` | SwitchParameter | No | Reserved. Accepted for compatibility but currently has no effect (no cost data is collected). |
 | `-SkipAzConnect` | SwitchParameter | No | Use the existing Az session instead of calling Connect-AzAccount. |
 
 ## Examples

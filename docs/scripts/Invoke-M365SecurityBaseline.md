@@ -8,7 +8,7 @@ Runs a Microsoft 365 tenant security baseline audit (Tegria or CIS) and produces
 |---|---|
 | Location | `scripts/windows/m365/Invoke-M365SecurityBaseline.ps1` |
 | Platform | Windows (PowerShell 5.1 or 7+) |
-| Permissions | Global Reader or Security Reader in the tenant (consent to the Graph scopes Directory.Read.All, Policy.Read.All, Reports.Read.All, Security.Read.All, AuditLog.Read.All, UserAuthenticationMethod.Read.All at sign-in), plus Exchange Online View-Only roles (View-Only Configuration and View-Only Recipients) and, for the CIS DLP check, Compliance Center view-only access |
+| Permissions | Global Reader or Security Reader in the tenant (consent to the Graph scopes Directory.Read.All, Policy.Read.All, Reports.Read.All, Security.Read.All, SecurityEvents.Read.All, AuditLog.Read.All, UserAuthenticationMethod.Read.All at sign-in), plus Exchange Online View-Only roles (View-Only Configuration and View-Only Recipients) and, for the CIS DLP check, Compliance Center view-only access |
 | Safety | Read-only |
 
 ## When to use
@@ -41,7 +41,6 @@ because of API limits; DLP checks need the right licensing; SPF/DMARC checks dep
 | `-OutputPath` | String | No | Folder for the reports. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-ExportCsv` | SwitchParameter | No | Also write the raw check results to a CSV next to the HTML report. |
 | `-InstallMissingModules` | SwitchParameter | No | Install Microsoft.Graph and ExchangeOnlineManagement for the current user if missing. |
-| `-SkipSharePointChecks` | SwitchParameter | No | Reserved for the SharePoint-related checks. Currently has no effect (no SharePoint checks are implemented). |
 
 ## Examples
 

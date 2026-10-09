@@ -21,7 +21,8 @@ Walks each path in -Paths down to -MaxDepth levels (folders plus common document
 every access control entry: identity, rights, allow/deny, owner and whether it is inherited. Local-machine
 accounts and inherited entries are hidden unless you ask for them. The HTML report highlights Deny entries
 and FullControl grants. With -ReportUnusedShares it also enumerates SMB shares on the target computers
-(collected in memory; the share list is not currently included in the HTML or CSV).
+(with their share-level permissions) and adds them as a second table in the HTML and, with -ExportCsv, as a
+separate CSV. The script lists the shares; it does not determine whether a share is in use.
 
 ## Parameters
 
@@ -34,7 +35,7 @@ and FullControl grants. With -ReportUnusedShares it also enumerates SMB shares o
 | `-MaxDepth` | Int32 | No | How many folder levels below each path to scan. Default: 3. |
 | `-IncludeInherited` | SwitchParameter | No | Include inherited entries (by default only explicit entries are listed). |
 | `-IncludeLocalUsers` | SwitchParameter | No | Include entries for local machine accounts (COMPUTERNAME\...), which are hidden by default. |
-| `-ReportUnusedShares` | SwitchParameter | No | Also enumerate SMB shares on the computers in -ComputerName. |
+| `-ReportUnusedShares` | SwitchParameter | No | Also enumerate SMB shares (and their share permissions) on the computers in -ComputerName. The list is added to the HTML report and, with -ExportCsv, written to a separate _Shares CSV. |
 | `-ComputerName` | String[] | No | Computers whose SMB shares are enumerated when -ReportUnusedShares is used. Default: the local machine. Old name: ShareComputers. |
 
 ## Examples

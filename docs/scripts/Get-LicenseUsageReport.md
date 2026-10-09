@@ -32,7 +32,6 @@ an optional CSV of the license inventory. This script is read-only.
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the license inventory to a CSV next to the HTML report. |
 | `-InactiveThresholdDays` | Int32 | No | Days without a sign-in after which a license holder is considered inactive. Default 90. |
-| `-ShowUnlicensedUsers` | SwitchParameter | No | Reserved. Currently has no effect on the output. |
 | `-SkipGraphConnect` | SwitchParameter | No | Skip Connect-MgGraph (use when a Graph session with suitable scopes already exists). |
 
 ## Examples

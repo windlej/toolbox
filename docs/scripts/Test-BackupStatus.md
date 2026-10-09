@@ -7,7 +7,7 @@ Verifies that backups are recent: Windows Server Backup sets and/or the newest f
 | | |
 |---|---|
 | Location | `scripts/windows/server/Test-BackupStatus.ps1` |
-| Platform | Windows (Windows Server Backup cmdlets for -CheckWbadmin; SMB access for remote backup paths) |
+| Platform | Windows (Windows Server Backup cmdlets for -CheckWbadmin; WinRM for remote -CheckWbadmin; SMB access for remote backup paths) |
 | Permissions | Local administrator on each target; read access to the backup folders or administrative shares |
 | Safety | Read-only |
 
@@ -20,9 +20,8 @@ Daily or weekly backup verification, or to confirm a customer's backups are actu
 For each computer, optionally lists Windows Server Backup sets (-CheckWbadmin) and optionally inspects
 backup folders (-BackupPaths, local or via the administrative share) to find the newest file. Each result is
 marked OK, Stale (older than -AlertIfOlderThanHours), Failed, Empty Backup Path or Unreachable. Output is an
-HTML report with a summary header, an optional CSV and a log file. If -AlertEmailTo is given and any backup
-is Failed or Stale, an email summary is sent through -SmtpServer (this is the only action outside the report
-folder; nothing else is changed).
+HTML report with a summary header, an optional CSV and a log file. Nothing else is changed.
+-CheckWbadmin runs Get-WBBackupSet locally for the local computer and through Invoke-Command (WinRM) for remote ones.
 
 ## Parameters
 
@@ -33,10 +32,8 @@ folder; nothing else is changed).
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write a CSV of the results next to the HTML report. |
 | `-AlertIfOlderThanHours` | Int32 | No | Backups older than this many hours are marked Stale. Default: 48. |
-| `-AlertEmailTo` | String[] | No | Optional recipients for an alert email when backups are Failed or Stale. No email is sent when omitted. |
-| `-SmtpServer` | String | No | SMTP server used for the alert email. Default: localhost. |
 | `-BackupPaths` | String[] | No | Folders (for example D:\Backups) whose newest file is checked. Remote computers are reached via the administrative share (\\computer\D$\...). |
-| `-CheckWbadmin` | SwitchParameter | No | Also query Windows Server Backup sets with Get-WBBackupSet. |
+| `-CheckWbadmin` | SwitchParameter | No | Also query Windows Server Backup sets with Get-WBBackupSet (through Invoke-Command for remote computers, so WinRM must be enabled on them). |
 
 ## Examples
 
@@ -45,6 +42,6 @@ folder; nothing else is changed).
 ```
 
 ```powershell
-.\Test-BackupStatus.ps1 -ComputerName SRV01,SRV02 -CheckWbadmin -AlertIfOlderThanHours 30 -AlertEmailTo it@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+.\Test-BackupStatus.ps1 -ComputerName SRV01,SRV02 -CheckWbadmin -AlertIfOlderThanHours 30 -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
 ```
 

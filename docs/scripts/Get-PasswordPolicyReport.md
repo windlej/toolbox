@@ -19,8 +19,9 @@ Security assessments, audit evidence for password policy, or finding accounts wi
 
 Reads the default domain password policy and any fine-grained password policies and lists them in an HTML report.
 With -AuditUsers it also evaluates every user (enabled only unless -IncludeDisabledUsers) and classifies each
-password as OK, WARNING, CRITICAL, EXPIRED or NEVER_EXPIRES based on the days until expiry and the thresholds
--PasswordAgeWarningDays / -PasswordAgeCriticalDays. The user table shows name, account, status, last set and expiry
+password as OK, WARNING, CRITICAL, EXPIRED, NEVER_EXPIRES or NO_EXPIRY_DATE based on the days until expiry and the
+thresholds -PasswordAgeWarningDays / -PasswordAgeCriticalDays. NO_EXPIRY_DATE means no expiry could be computed
+(for example no password-last-set value or no maximum password age) and is not treated as expired. The user table shows name, account, status, last set and expiry
 dates and lockout state; no password data is read. -ExportCsv writes the per-user results (only with -AuditUsers).
 
 ## Parameters
@@ -31,8 +32,8 @@ dates and lockout state; no password data is read. -ExportCsv writes the per-use
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write a CSV of the per-user results. Only has an effect together with -AuditUsers. |
 | `-AuditUsers` | SwitchParameter | No | Include the per-user password compliance audit (list of named user accounts). Without it only the policy is reported. |
-| `-PasswordAgeWarningDays` | Int32 | No | Users whose password expires within this many days are marked WARNING. Default 30. |
-| `-PasswordAgeCriticalDays` | Int32 | No | Users whose password expires within this many days are marked CRITICAL. Default 60 (should be lower than the warning value for sensible results; the critical check runs first). |
+| `-PasswordAgeWarningDays` | Int32 | No | Users whose password expires within this many days (but not within the critical window) are marked WARNING. Default 30. Must be greater than -PasswordAgeCriticalDays. |
+| `-PasswordAgeCriticalDays` | Int32 | No | Users whose password expires within this many days are marked CRITICAL. Default 7. Must be lower than -PasswordAgeWarningDays, otherwise the script stops with an error. |
 | `-IncludeDisabledUsers` | SwitchParameter | No | Include disabled accounts in the user audit. |
 
 ## Examples

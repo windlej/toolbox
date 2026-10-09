@@ -90,13 +90,6 @@ Rules for whoever picks one up: read `docs/DESIGN-GUIDE.md` first, fix only that
 - **Verify:** read-through.
 - **Severity:** Low (cosmetic)
 
-### BUG-013: Get-PrivilegedGroupChange alert e-mail has no authentication or TLS
-- **File:** `scripts/windows/active-directory/Get-PrivilegedGroupChange.ps1` (`System.Net.Mail.SmtpClient` block)
-- **Symptom:** Mail is sent unauthenticated and in clear text, so it only works with an internal relay that accepts anonymous mail. Cloud relays (e.g. Exchange Online SMTP AUTH) are not usable.
-- **Suggested fix:** Add `-SmtpCredential` (PSCredential) and `-SmtpUseSsl`, set `$Smtp.Credentials = $SmtpCredential.GetNetworkCredential()` and `$Smtp.EnableSsl`. Update the help.
-- **Verify:** read-through; needs a real relay to test.
-- **Severity:** Low (feature gap)
-
 ### BUG-014: Get-PrivilegedGroupChange hides AD read failures
 - **File:** `scripts/windows/active-directory/Get-PrivilegedGroupChange.ps1` (`Get-PrivilegedMembers`)
 - **Symptom:** `Get-ADGroup`, `Get-ADGroupMember` and `Get-ADPrincipalGroupMembership` use `-ErrorAction SilentlyContinue`. A group that cannot be read, or a missing group, is skipped without a log line. Worse, a failed membership read looks like "no members", so a later `-CompareWithBaseline` reports every member as Removed, and `-UpdateBaseline` saves a baseline that lacks them.
@@ -110,20 +103,6 @@ Rules for whoever picks one up: read `docs/DESIGN-GUIDE.md` first, fix only that
 - **Suggested fix:** Wrap each inserted value in `[System.Net.WebUtility]::HtmlEncode(...)`. One commit per script.
 - **Verify:** read-through; confirm `A&B <x>` renders literally.
 - **Severity:** Low
-
-### BUG-016: Test-BackupStatus and Test-ServiceHealth use deprecated Send-MailMessage
-- **File:** `scripts/windows/server/Test-BackupStatus.ps1`, `scripts/windows/server/Test-ServiceHealth.ps1` (alert block at the end)
-- **Symptom:** `Send-MailMessage` is deprecated and sends without TLS or credentials. Same limitation as BUG-013.
-- **Suggested fix:** Replace with `System.Net.Mail.SmtpClient` as in `Get-PrivilegedGroupChange` (commit `90f3bd2`); ideally add `-SmtpCredential`/`-SmtpUseSsl` at the same time. One commit per script.
-- **Verify:** read-through; needs a real relay to test.
-- **Severity:** Low
-
-### BUG-017: Test-BackupStatus and Test-ServiceHealth `-SmtpServer` defaults to localhost
-- **File:** `scripts/windows/server/Test-BackupStatus.ps1`, `scripts/windows/server/Test-ServiceHealth.ps1` (`-SmtpServer` parameter)
-- **Symptom:** `Get-PrivilegedGroupChange` has no default and requires `-AlertEmailTo`, `-From` and `-SmtpServer` together. These two require only `-From`, so an alert without `-SmtpServer` tries localhost and fails with a WARN.
-- **Suggested fix:** Remove the default and extend the start-up check to `-AlertEmailTo` requires `-From` and `-SmtpServer`. Update the help.
-- **Verify:** read-through; confirm `-AlertEmailTo` alone stops with the error.
-- **Severity:** Low (consistency)
 
 ### BUG-018: Test-BackupStatus reads Windows Server Backup properties that may not exist
 - **File:** `scripts/windows/server/Test-BackupStatus.ps1` (`Test-WbadminBackup`: `SnapshotFailed`, `SystemState`, `BackupSize`)
@@ -267,6 +246,8 @@ Rules for whoever picks one up: read `docs/DESIGN-GUIDE.md` first, fix only that
 
 ## Fixed
 
+_Historical: the rows below are kept as a record. The e-mail alerting they mention (`-AlertEmailTo`, `-From`, `-SmtpServer`, `SmtpClient`) was later removed from these scripts because they are only run ad hoc._
+
 | ID | Script | Summary | Commit |
 |---|---|---|---|
 | (pre-log) | `Remove-StaleADComputer.ps1` | Opt-in `-IncludeNeverLoggedOn` (age from whenCreated); child objects skipped by default, `-DeleteChildObjects` to remove them | `e1149cb` |
@@ -297,10 +278,10 @@ Rules for whoever picks one up: read `docs/DESIGN-GUIDE.md` first, fix only that
 - `Test-EntraConnectHealth.ps1`: run against a lab tenant and confirm the Az check passes with a session and fails without one, that `Connect-MgGraph` prompts once (or reuses a session), and that `-SkipGraphConnect` reports sync as undetermined. The catalog (`docs/scripts/Test-EntraConnectHealth.md`) is stale after the 1.2 header change.
 - `Remove-StaleADComputer.ps1`: run `-DeleteComputers -WhatIf` against a lab domain with a disabled computer that has child objects (e.g. a BitLocker recovery object). Confirm it is skipped by default and shown as `Delete (with N child object(s))` with `-DeleteChildObjects`. Confirm `-IncludeNeverLoggedOn` finds an old, never-logged-on account (this also tests the `Created` term in the server-side filter). Its catalog page is stale after the 1.1 header change.
 - `Get-PasswordPolicyReport.ps1`: run with `-AuditUsers` against a lab domain and confirm a user with no expiry shows `NO_EXPIRY_DATE`, that WARNING/CRITICAL fire at the new defaults, and that `-PasswordAgeCriticalDays 30 -PasswordAgeWarningDays 30` stops with the error. Its catalog page is stale after the 1.1 header change.
-- `Get-PrivilegedGroupChange.ps1`: in a lab, run `-UpdateBaseline`, add a test user to a monitored group, then run `-CompareWithBaseline -UpdateBaseline` and confirm the user shows as Added and the baseline is replaced afterwards. Send a test alert through a real relay with `-AlertEmailTo -From -SmtpServer`, and confirm `-AlertEmailTo` alone stops with the error. Its catalog page is stale after the 1.1 header change.
+- `Get-PrivilegedGroupChange.ps1`: in a lab, run `-UpdateBaseline`, add a test user to a monitored group, then run `-CompareWithBaseline -UpdateBaseline` and confirm the user shows as Added and the baseline is replaced afterwards. Its catalog page is stale after the 1.1 header change.
 - `Get-ADGroupMembershipReport.ps1`: confirm `-GroupNameFilter 'SG-*'` and the default `*` still match, and that a value such as `a'b(c)` returns no groups without an error. Its catalog page is stale after the help change.
 - `Get-HyperVInventory.ps1`: run against a host with running and stopped VMs and confirm the Uptime column shows `Xd Xh Xm` for running VMs and `N/A` for stopped ones.
-- `Test-BackupStatus.ps1`: run `-CheckWbadmin` against a remote server with WinRM and Windows Server Backup, and against the local machine. Confirm the sets are listed with sensible properties (see BUG-018), and that `-AlertEmailTo` alone stops with the error. Its catalog page is stale after the help change.
+- `Test-BackupStatus.ps1`: run `-CheckWbadmin` against a remote server with WinRM and Windows Server Backup, and against the local machine. Confirm the sets are listed with sensible properties (see BUG-018). Its catalog page is stale after the help change.
 - `Test-ServiceHealth.ps1`: run in both Windows PowerShell 5.1 and PowerShell 7, locally and against a remote server. Confirm Health and StartType match `Get-Service`, and that `-ShowAllServices` lists every service. Its catalog page is stale after the help change.
 - `Get-PatchComplianceReport.ps1`: run with `-IncludeRebootStatus -KbIds <a KB>` against the local machine and a remote server with WinRM. Confirm PendingReboot reflects the remote host and the KB Check column shows a date or "Not found". Its catalog page is stale after the help change.
 - `Get-FileServerPermissionReport.ps1`: run with `-ReportUnusedShares -ExportCsv` on a file server. Confirm the share table and `_Shares` CSV list share permissions as `Account=Allow:Full`, and that a missing path no longer throws on `$Item.Name`. Its catalog page is stale after the help change.

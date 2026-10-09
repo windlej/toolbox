@@ -18,11 +18,13 @@ Disaster-recovery readiness review, or to prove backup coverage to an auditor or
 ## Description
 
 For each accessible subscription (or the ones you list) the script lists all Recovery Services vaults and the
-Azure VM backup items in them, then compares VM names against every VM in the subscription. Each VM is marked
+Azure VM backup items in them, then compares each item's source VM resource ID against every VM in the subscription. Each VM is marked
 Protected or UNPROTECTED; vaults and their backup policy names are also recorded.
 
 Output is an HTML report (primary) listing the VMs with coverage percentage, plus an optional CSV of the VM
-rows. Matching is by VM name only. The script makes no changes to Azure.
+rows. Matching is by VM resource ID, so same-named VMs in different resource groups are told apart. Vaults are
+queried with -VaultId; the deprecated Set-AzRecoveryServicesVaultContext is not used. A vault whose backup items
+cannot be read is logged as a warning (VMs may then show as UNPROTECTED). The script makes no changes to Azure.
 
 ## Parameters
 

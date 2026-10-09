@@ -25,7 +25,8 @@ policies and Named Locations (GUIDs are resolved to names), and writes three fil
   - a findings CSV with risk findings from six rules: disabled policy, report-only policy, no MFA or
     authentication strength, All Users with no exclusions, overly broad conditions, and no device
     compliance or hybrid join requirement.
-A summary is printed to the console. This script is read-only.
+A summary is printed to the console. This script is read-only. On a fatal error it logs the error and returns;
+when run non-interactively (powershell -File or -NonInteractive) it also sets exit code 1.
 
 ## Parameters
 

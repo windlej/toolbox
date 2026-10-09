@@ -7,7 +7,7 @@ Checks that key Windows services are running on one or more servers and reports 
 | | |
 |---|---|
 | Location | `scripts/windows/server/Test-ServiceHealth.ps1` |
-| Platform | Windows (Windows PowerShell 5.1 for remote Get-Service -ComputerName; WMI/CIM access to targets) |
+| Platform | Windows (Windows PowerShell 5.1 or PowerShell 7; CIM over WinRM to remote targets) |
 | Permissions | Local administrator (or remote service query rights) on each target computer |
 | Safety | Read-only |
 
@@ -21,8 +21,8 @@ For each computer, looks up each service in -ServiceNames and classifies it: Hea
 (stopped but set to start automatically), Stopped (stopped, manual or disabled), Degraded (any other state,
 for example starting or stopping) or Unknown (service not found). The default list covers common infrastructure
 services (IIS, SQL Server, DNS, AD DS, DHCP, file sharing, WinRM and others). Output is an HTML report with a
-summary header, an optional CSV and a log file. If -AlertEmailTo is given and any service is Critical, an
-email is sent through -SmtpServer; nothing else is changed.
+summary header, an optional CSV and a log file; nothing is changed. Services are read with CIM (Win32_Service), which works in Windows
+PowerShell 5.1 and PowerShell 7; the local computer is queried directly and remote ones over WinRM.
 
 ## Parameters
 
@@ -33,9 +33,7 @@ email is sent through -SmtpServer; nothing else is changed.
 | `-OutputPath` | String | No | Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write a CSV of the results next to the HTML report. |
-| `-AlertEmailTo` | String[] | No | Optional recipients for an alert email when any service is Critical. No email is sent when omitted. |
-| `-SmtpServer` | String | No | SMTP server used for the alert email. Default: localhost. |
-| `-ShowAllServices` | SwitchParameter | No | Accepted for compatibility; not used by the current logic. |
+| `-ShowAllServices` | SwitchParameter | No | Report every service found on each computer instead of only the ones in -ServiceNames. Each is classified the same way (so stopped automatic services are still Critical). |
 
 ## Examples
 
@@ -44,6 +42,6 @@ email is sent through -SmtpServer; nothing else is changed.
 ```
 
 ```powershell
-.\Test-ServiceHealth.ps1 -ComputerName SRV01,SRV02 -ServiceNames W3SVC,MSSQLSERVER -AlertEmailTo it@contoso.com -SmtpServer smtp.contoso.com -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
+.\Test-ServiceHealth.ps1 -ComputerName SRV01,SRV02 -ServiceNames W3SVC,MSSQLSERVER -ExportCsv -OutputPath D:\Reports -CustomerName Contoso
 ```
 

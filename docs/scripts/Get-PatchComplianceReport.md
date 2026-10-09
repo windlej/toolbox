@@ -20,7 +20,7 @@ Monthly patch review, before a maintenance window, or to show a customer which s
 Queries the Windows Update Agent install history on each computer and finds the most recent successful
 update. A server is Compliant when that update is no more than -DaysSinceLastUpdate days old, Out of Date
 when older, and Never Updated when no successful install is found. Optionally checks for a pending reboot
-and for specific KB numbers in the history (the KB results are collected but not shown in the HTML or CSV).
+and for specific KB numbers in the history (shown in the KB Check column of the HTML and CSV).
 The report is an HTML table with a summary header. A log file is also written.
 
 ## Parameters
@@ -32,8 +32,8 @@ The report is an HTML table with a summary header. A log file is also written.
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write a CSV of the results next to the HTML report. |
 | `-DaysSinceLastUpdate` | Int32 | No | Maximum age in days of the last successful update for a server to count as Compliant. Default: 30. |
-| `-KbIds` | String[] | No | Optional KB identifiers (for example KB5030211) to look for in the update history. |
-| `-IncludeRebootStatus` | SwitchParameter | No | Check the registry for a pending reboot on the local machine and set the PendingReboot column. Note: the registry check runs on the machine running the script, not on remote targets. |
+| `-KbIds` | String[] | No | Optional KB identifiers (for example KB5030211) to look for in the update history. The result per KB (date found, or Not found) is written to the KB Check column of the HTML and CSV. |
+| `-IncludeRebootStatus` | SwitchParameter | No | Check the registry on each target for a pending reboot (remote targets are queried with Invoke-Command, which needs WinRM) and set the PendingReboot column. If the check fails for a target, PendingReboot is left blank. |
 
 ## Examples
 

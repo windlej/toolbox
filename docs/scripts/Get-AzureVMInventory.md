@@ -7,7 +7,7 @@ Inventories Azure virtual machines across subscriptions with an estimated monthl
 | | |
 |---|---|
 | Location | `scripts/windows/azure/Get-AzureVMInventory.ps1` |
-| Platform | Windows (PowerShell 5.1+ with Az.Accounts and Az.Compute modules) |
+| Platform | Windows (PowerShell 5.1+ with Az.Accounts, Az.Compute and Az.Network modules) |
 | Permissions | Azure RBAC Reader on each subscription being scanned |
 | Safety | Read-only |
 
@@ -18,10 +18,12 @@ Cloud estate discovery, right-sizing conversations, or finding stopped-but-not-d
 ## Description
 
 For each accessible subscription (or the ones you list) the script reads every VM with its power state and
-records name, resource group, region, size, OS type, attached managed disk size, tags and the NIC reference.
-Cost is an ESTIMATE only: it uses a small built-in pay-as-you-go rate card (USD per month) for common sizes
-and a rough per-core guess for others; deallocated or stopped VMs are costed at zero. It does not read actual
-billing data.
+records name, resource group, region, size, OS type, attached managed disk size, tags and the private IP
+address(es) of its network interfaces (looked up from the NICs; blank if the NICs cannot be read).
+Cost is an ESTIMATE only, and is labelled that way in the report and CSV (EstimatedMonthlyCostUSD,
+EstimatedAnnualCostUSD): it uses a small hardcoded pay-as-you-go rate card (USD per month, not region specific)
+for common sizes and a rough per-core guess for others; deallocated or stopped VMs are costed at zero. The rates
+are illustrative and will drift from current Azure pricing. It does not read actual billing data.
 
 Output is an HTML report (primary) sorted by estimated cost with running/stopped/OS totals, plus an optional CSV
 with all columns. The script makes no changes to Azure.

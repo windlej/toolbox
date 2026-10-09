@@ -8,7 +8,7 @@ Reports the tenant's current Microsoft Secure Score, optionally with a per-contr
 |---|---|
 | Location | `scripts/windows/m365/Get-SecureScoreReport.ps1` |
 | Platform | Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK) |
-| Permissions | Graph scope SecurityEvents.Read.All (Security Reader or Global Reader) |
+| Permissions | Graph scopes SecurityEvents.Read.All, Organization.Read.All (Security Reader or Global Reader) |
 | Safety | Read-only |
 
 ## When to use
@@ -18,7 +18,7 @@ Security posture review, baseline before a hardening project, or quarterly progr
 ## Description
 
 Reads the latest Microsoft Secure Score from the Microsoft Graph (beta) security API and writes an HTML
-report with the current and maximum score and percentage. With -IncludeControlScores it also reads the
+report with the tenant name, the current and maximum score and percentage. With -IncludeControlScores it also reads the
 Secure Score control profiles, calculates the percentage achieved per control, averages them per category,
 and lists the 50 lowest-scoring controls with their state and tier. An optional CSV contains the per-control
 data (only available with -IncludeControlScores). This script is read-only. If no score data is returned,

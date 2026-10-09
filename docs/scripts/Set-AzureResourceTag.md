@@ -36,8 +36,8 @@ Output is an HTML report (primary) with compliance counts and one row per resour
 | `-OutputPath` | String | No | Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the results to a CSV next to the HTML report. |
-| `-RequiredTags` | String[] | Yes | Tag names every resource must have. Mandatory; for example Environment, Owner, CostCenter. |
-| `-EnforcedTagValues` | String[] | No | Optional list of "Tag=Value" entries. A required tag listed here must equal that value to be compliant. |
+| `-RequiredTags` | String[] | No | Tag names every resource must have. Optional. Default: Environment, Owner, CostCenter. |
+| `-EnforcedTagValues` | String[] | No | Optional list of "Tag=Value" entries. A required tag listed here must equal that value to be compliant. Every tag named here must also be in -RequiredTags, and each entry must be Tag=Value (the value may itself contain '='); otherwise the script stops before doing anything. |
 | `-ApplyTags` | SwitchParameter | No | Add missing required tags (value from -DefaultValue). Without this switch the script is read-only. |
 | `-DefaultValue` | String | No | Value written for missing tags when -ApplyTags is used. Default: Unknown. |
 | `-SkipAzConnect` | SwitchParameter | No | Use the existing Az session instead of calling Connect-AzAccount. |

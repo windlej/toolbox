@@ -8,7 +8,7 @@ Bulk offboards Microsoft 365 users: blocks sign-in and optionally revokes sessio
 |---|---|
 | Location | `scripts/windows/m365/Invoke-UserOffboarding.ps1` |
 | Platform | Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK; ExchangeOnlineManagement for mailbox steps) |
-| Permissions | Graph scopes requested at sign-in: User.ReadWrite.All, Directory.ReadWrite.All, MailboxSettings.ReadWrite, Sites.FullControl.All, Files.ReadWrite.All (User Administrator, plus License Administrator for -RemoveLicenses); Exchange Online Recipient Management or Exchange Administrator for mailbox steps |
+| Permissions | Graph scopes requested at sign-in: User.ReadWrite.All, Directory.ReadWrite.All, MailboxSettings.ReadWrite (User Administrator, plus License Administrator for -RemoveLicenses); Exchange Online Recipient Management or Exchange Administrator for mailbox steps |
 | Safety | Destructive (supports -WhatIf) |
 
 ## When to use
@@ -21,8 +21,7 @@ For each user from a CSV or a list of user principal names, the script always bl
 AccountEnabled to false) and then runs the optional steps you ask for: revoke refresh tokens and sign-in
 sessions (-RevokeSessions), remove all assigned licenses (-RemoveLicenses), convert the mailbox to a shared
 mailbox (-ConvertToSharedMailbox, Exchange Online) and set mailbox forwarding (-ForwardTo, Exchange Online).
-It also looks up the user's OneDrive and manager and records the result; note that the OneDrive step currently
-only reports what it found and does not change retention or permissions. Every state-changing call honours
+It does not change OneDrive retention or access; handle those separately. Every state-changing call honours
 -WhatIf and -Confirm. The output is an HTML report with one row per operation (user, action, status, detail,
 timestamp) and a log file.
 
@@ -34,8 +33,6 @@ timestamp) and a log file.
 | `-UserPrincipalNames` | String[] | No | One or more user principal names to offboard. Use instead of -CsvPath. |
 | `-OutputPath` | String | No | Folder for the report and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
-| `-ManagerCsvPath` | String | No | Optional INPUT file: CSV with User and Manager columns used to name the OneDrive delegate. Falls back to the manager in Entra ID. |
-| `-OneDriveRetentionDays` | Int32 | No | Reserved for the OneDrive retention period. Currently has no effect. Default 30. |
 | `-RevokeSessions` | SwitchParameter | No | Also revoke the users' refresh tokens and sign-in sessions. |
 | `-ConvertToSharedMailbox` | SwitchParameter | No | Also convert the user mailbox to a shared mailbox (requires Exchange Online). |
 | `-ForwardTo` | String | No | Also forward the user's mail to this address (requires Exchange Online). Mail is not kept in the original mailbox. |

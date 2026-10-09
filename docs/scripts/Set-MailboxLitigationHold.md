@@ -22,6 +22,8 @@ Litigation Hold state, duration, note and retention-hold flag. With -EnableHold 
 -HoldDurationDays and -HoldNote) for mailboxes where it is off. With -DisableHold it turns Litigation Hold off for
 mailboxes where it is on. With neither switch, or with -ReportOnly, it only reports.
 
+A mailbox that cannot be found is recorded with the action "Not found" and skipped; no change is attempted.
+
 Disabling a hold can allow preserved data to be purged under the retention policy, so confirm with legal/compliance
 first. Use -WhatIf to preview every change. If both -EnableHold and -DisableHold are given, enabling takes priority.
 

@@ -22,6 +22,12 @@ an HTML report listing each stale computer with its OS, enabled state, last logo
 creation date and the action taken. By default nothing is changed (report only). -DisableComputers disables
 enabled stale accounts; -DeleteComputers deletes stale accounts that are already disabled. Both honor -WhatIf and
 -Confirm, so a dry run shows the planned action ("Disable"/"Delete") in the report without touching AD.
+Accounts that have never logged on have no LastLogonDate and are skipped by default. -IncludeNeverLoggedOn also
+reports them, using the creation date (whenCreated) as the age basis; the AgeBasis column shows which date was used.
+A computer account that contains child objects (for example BitLocker recovery or Hyper-V objects) cannot be deleted
+with Remove-ADComputer. By default such accounts are skipped, reported as "DeleteSkippedHasChildren" and logged.
+-DeleteChildObjects deletes the account together with its child objects (Remove-ADObject -Recursive); the child
+count is shown in the report and in the -WhatIf message.
 Recommended order: run report-only, run with -DisableComputers, wait a retention period, then run with -DeleteComputers.
 
 ## Parameters
@@ -34,6 +40,8 @@ Recommended order: run report-only, run with -DisableComputers, wait a retention
 | `-OuPath` | String | No | Optional distinguished name of an OU to limit the search to. |
 | `-DisableComputers` | SwitchParameter | No | Disable stale computer accounts that are currently enabled. Supports -WhatIf. |
 | `-DeleteComputers` | SwitchParameter | No | Delete stale computer accounts that are already disabled. Supports -WhatIf. Deletion is permanent unless the AD Recycle Bin is enabled. |
+| `-IncludeNeverLoggedOn` | SwitchParameter | No | Also treat computer accounts with no LastLogonDate as candidates, using the creation date as the age basis (created at least -InactiveDays ago). Off by default. Combine with -DisableComputers / -DeleteComputers to act on them. |
+| `-DeleteChildObjects` | SwitchParameter | No | With -DeleteComputers, delete computer accounts that contain child objects, removing the children too (Remove-ADObject -Recursive). Off by default; without it such accounts are skipped and reported. Supports -WhatIf. |
 
 ## Examples
 

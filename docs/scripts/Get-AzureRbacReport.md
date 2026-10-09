@@ -19,8 +19,10 @@ Access review of a customer subscription, before removing standing Owner rights,
 
 For each accessible subscription (or the ones you list) the script reads role assignments at the subscription
 scope and at every resource group scope, and keeps the ones whose role is in the privileged role list.
-Each result row records the principal (display name, sign-in name, object type), role, scope and whether the
-principal is a service principal.
+Each result row records the principal (display name, sign-in name, object type), role, the assignment's own scope
+(with ScopeType and ScopeName: ManagementGroup, Subscription, ResourceGroup or Resource) and whether the principal
+is a service principal. A scope query also returns inherited and descendant assignments, so each role assignment
+is reported once, no matter how many queries returned it.
 
 Output is an HTML report (primary) with Owner / Contributor / user / service principal counts and one row per
 assignment, plus an optional CSV. The script makes no changes to Azure.

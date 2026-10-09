@@ -34,7 +34,7 @@ Output is an HTML report (primary) with counts and one row per VM, plus an optio
 | `-OutputPath` | String | No | Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the results to a CSV next to the HTML report. |
-| `-DefaultShutdownTime` | String | No | Daily shutdown time in HHmm 24-hour format, for example 1900. Default: "19:00" (kept from the original script; the DevTest API expects HHmm, so use 1900 style values if the schedule is rejected). |
+| `-DefaultShutdownTime` | String | No | Daily shutdown time in HHmm 24-hour format with no colon, for example 1900 (the format the Microsoft.DevTestLab schedule API expects). Default: 1900. Values such as "19:00" or "2460" are rejected at parameter binding. |
 | `-DefaultTimeZone` | String | No | Windows time zone id for the schedule. Default: Eastern Standard Time. Use the customer's zone (tzutil /l). |
 | `-ApplySchedules` | SwitchParameter | No | Create the shutdown schedule on VMs that lack one. Without this switch the script is read-only. |
 | `-SkipAzConnect` | SwitchParameter | No | Use the existing Az session instead of calling Connect-AzAccount. |

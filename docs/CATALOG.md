@@ -83,7 +83,7 @@
 
 | Script | What it does | When to use | Safety |
 |---|---|---|---|
-| [Get-DiskSpaceStatus](scripts/Get-DiskSpaceStatus.md) | Monitors disk space on Windows systems and sends alerts when free space falls below a configurable threshold. | Scheduled daily check on a server to catch volumes running low before they fill, or an ad-hoc free-space check during an incident. | Changes data (supports -WhatIf) |
+| [Get-DiskSpaceStatus](scripts/Get-DiskSpaceStatus.md) | Checks disk space on Windows systems and flags drives whose free space falls below a configurable threshold. | Ad-hoc free-space check on a server, for example during an incident or before a change that needs room. | Changes data (supports -WhatIf) |
 | [Get-DiskUsageAudit](scripts/Get-DiskUsageAudit.md) | Finds the largest files and duplicate files under a local or UNC path (audit only). | A volume is filling up and you need to see what is taking space, or to find duplicate data before a migration. | Read-only |
 | [Get-EventLogAnomaly](scripts/Get-EventLogAnomaly.md) | Windows Event Log Anomaly Parser - detects critical errors and behavioral anomalies across System, Application, and Security logs on local or remote machines. | After an unexpected reboot, crash or slowdown, or as a routine check for repeated errors, bursts and failed logons across servers. | Read-only |
 | [Get-FileServerPermissionReport](scripts/Get-FileServerPermissionReport.md) | Audits NTFS permissions on one or more folder trees and writes an HTML report (optional CSV). | Access reviews, tracking down who has FullControl or explicit Deny on a share, or before a file server migration. | Read-only |

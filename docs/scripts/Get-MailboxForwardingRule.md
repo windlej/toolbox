@@ -37,8 +37,8 @@ all written to the output folder.
 | `-OutputPath` | String | No | Folder for the report, CSV and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the findings to a CSV next to the HTML report. |
-| `-DetectMailboxForwarding` | SwitchParameter | No | Check the ForwardingAddress / ForwardingSmtpAddress properties on each mailbox. |
-| `-DetectInboxRuleForwarding` | SwitchParameter | No | Check each mailbox's inbox rules for ForwardTo / RedirectTo actions. |
+| `-DetectMailboxForwarding` | SwitchParameter | No | Check the ForwardingAddress / ForwardingSmtpAddress properties on each mailbox. If neither this nor -DetectInboxRuleForwarding is given, both checks run. |
+| `-DetectInboxRuleForwarding` | SwitchParameter | No | Check each mailbox's inbox rules for ForwardTo / RedirectTo actions. If neither this nor -DetectMailboxForwarding is given, both checks run. |
 | `-RemoveForwarding` | SwitchParameter | No | Clear detected mailbox forwarding and disable detected inbox rules. Supports -WhatIf and -Confirm. |
 | `-SkipExchangeConnect` | SwitchParameter | No | Do not call Connect-ExchangeOnline; use an existing session. |
 

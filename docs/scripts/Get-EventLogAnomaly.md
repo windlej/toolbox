@@ -27,7 +27,7 @@ to the output folder. A log file is always written to the output folder.
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `-ComputerName` | String[] | No | One or more target machine names. Defaults to the local machine. |
+| `-ComputerName` | String[] | No | One or more target machine names. Defaults to the local machine. Local aliases (the short name, the local FQDN, 'localhost', '.', 127.0.0.1) are treated as the local machine and queried without a remote call. |
 | `-HoursBack` | Int32 | No | How many hours back to search. Default is 24. |
 | `-Logs` | String[] | No | Which logs to query: System, Application, Security. Default is System + Application. |
 | `-EventIDs` | Int32[] | No | Optional array of specific Event IDs to filter on. Leave empty for all critical/error events. |

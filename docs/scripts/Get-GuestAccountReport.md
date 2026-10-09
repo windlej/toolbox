@@ -17,8 +17,7 @@ Quarterly external-access review, or before cleaning up guests left behind by fi
 
 ## Description
 
-Retrieves every guest user (userType eq 'Guest') with sign-in activity, invitation details and group
-membership, and flags guests whose last sign-in is older than the stale threshold (or who never signed in).
+Retrieves every guest user (userType eq 'Guest') with sign-in activity and group membership, and flags guests whose last sign-in is older than the stale threshold (or who never signed in).
 By default the script is read-only. With -BlockSignInForStale it disables stale guest accounts; with
 -RemoveStaleGuests it deletes them (removal takes precedence when both are given). Both actions honour
 -WhatIf and -Confirm. Output is an HTML report (primary) with a summary and one row per guest, plus an

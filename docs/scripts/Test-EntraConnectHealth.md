@@ -18,13 +18,15 @@ First-pass check of a hybrid tenant before a migration or when users report that
 ## Description
 
 Signs in to Azure and records a short list of checks: Az connectivity, tenant discovery, subscription access, and
-(when a Microsoft Graph session exists) whether the tenant has on-premises directory synchronization enabled.
+(via Microsoft Graph) whether the tenant has on-premises directory synchronization enabled.
 When sync is enabled, informational rows are added reminding you to verify sync health and password hash sync
 in the Entra Connect Health portal.
 
 This is a lightweight sanity check, not a full Entra Connect health assessment: it does not read sync cycles,
-connector errors or server status. The sync-status lookup uses Invoke-MgGraphRequest, so run Connect-MgGraph
-(Organization.Read.All) first; without a Graph session the status is reported as undetermined.
+connector errors or server status. The sync-status lookup uses Invoke-MgGraphRequest. An existing Graph session with
+Organization.Read.All is reused; otherwise the script signs in with Connect-MgGraph -Scopes Organization.Read.All.
+If the Graph module is missing, sign-in fails, or -SkipGraphConnect is set, the status is reported as undetermined.
+The "Az Module Connection" check passes when an Az context with an account exists.
 
 Output is an HTML report (primary) with pass/warn/fail counts and one row per check, plus an optional CSV.
 The script makes no changes to Azure or Entra.
@@ -37,6 +39,7 @@ The script makes no changes to Azure or Entra.
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the check results to a CSV next to the HTML report. |
 | `-SkipAzConnect` | SwitchParameter | No | Use the existing Az session instead of calling Connect-AzAccount. |
+| `-SkipGraphConnect` | SwitchParameter | No | Do not call Connect-MgGraph. If no Graph session with Organization.Read.All exists, the sync-status check is skipped and reported as undetermined. |
 
 ## Examples
 

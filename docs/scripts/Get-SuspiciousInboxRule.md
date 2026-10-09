@@ -35,7 +35,7 @@ detail (forward targets, subject/body match text) may be sensitive; store the ou
 | `-OutputPath` | String | No | Folder for the report, CSV and log. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the rule rows to a CSV next to the HTML report. |
-| `-SuspiciousKeywords` | String[] | No | Keywords that flag a rule when found in its name, description or action text. A built-in list is used by default. |
+| `-SuspiciousKeywords` | String[] | No | Keywords that flag a rule when found in its name, description or action text. A built-in list focused on forwarding and exfiltration terms is used by default (generic words such as "rule", "copy" and "archive" are deliberately not included because they flag benign rules). Delete, mark-as-read and stop-processing actions are flagged separately and do not need a keyword. |
 | `-SuspiciousDomains` | String[] | No | Optional list of domains; rules forwarding or redirecting to any of them are flagged. |
 | `-MaxRuleReportLength` | Int32 | No | Reserved. Accepted for compatibility but not used by the current report. |
 | `-ReportAllRules` | SwitchParameter | No | Report every inbox rule found, not just the suspicious ones. |

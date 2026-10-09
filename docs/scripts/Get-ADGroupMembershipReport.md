@@ -29,7 +29,7 @@ row per group member; -ExportCsv adds a CSV with the same data plus group catego
 | `-OutputPath` | String | No | Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-GroupNames` | String[] | No | Optional. Names of the groups to audit. If omitted, groups are selected with -GroupNameFilter. |
-| `-GroupNameFilter` | String | No | Wildcard (-like) filter on group Name used when -GroupNames is not given. Default '*' (all groups). |
+| `-GroupNameFilter` | String | No | Filter on group Name used when -GroupNames is not given. Default '*' (all groups). '*' is the only wildcard; all other characters, including quotes, parentheses and backslashes, are matched literally. |
 | `-ExportCsv` | SwitchParameter | No | Also write a CSV next to the HTML report. |
 | `-Recursive` | SwitchParameter | No | Expand nested group membership. |
 | `-IncludeDisabledUsers` | SwitchParameter | No | Include disabled user accounts (skipped by default). |

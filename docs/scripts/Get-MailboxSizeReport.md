@@ -23,6 +23,8 @@ Critical against -WarningSizeGB and -CriticalSizeGB based on the primary mailbox
 
 Output is an HTML report (primary, largest 500 mailboxes shown, Warning/Critical rows highlighted), an optional
 CSV with every mailbox (-ExportCsv) and a log file, all in the output folder. The script does not change anything.
+It reports sizes at the time of the run only; Exchange Online keeps no size history, so growth is not calculated
+(compare the CSVs from two runs to see growth).
 
 ## Parameters
 
@@ -34,8 +36,6 @@ CSV with every mailbox (-ExportCsv) and a log file, all in the output folder. Th
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write all mailbox rows to a CSV next to the HTML report. |
 | `-IncludeArchive` | SwitchParameter | No | Also collect archive mailbox size and item count for mailboxes with an active archive. |
-| `-ShowGrowth` | SwitchParameter | No | Reserved. Accepted for compatibility but not used by the current report. |
-| `-TopGrowthDays` | Int32 | No | Reserved. Accepted for compatibility but not used by the current report. |
 | `-WarningSizeGB` | Int32 | No | Primary mailbox size in GB at or above which a mailbox is rated Warning. Default 50. |
 | `-CriticalSizeGB` | Int32 | No | Primary mailbox size in GB at or above which a mailbox is rated Critical. Default 80. |
 | `-SkipExchangeConnect` | SwitchParameter | No | Do not call Connect-ExchangeOnline; use an existing session. |
