@@ -15,7 +15,8 @@ Output is an HTML report (primary) with totals and one row per subscription, plu
 column set. The script makes no changes to Azure.
 
 .PARAMETER SubscriptionIds
-Currently not applied: the script audits every accessible subscription regardless of this value.
+Optional. Limit the audit to these subscription IDs. Default is every subscription the account can see. An ID that
+is not visible to the account is logged as a warning and skipped.
 
 .PARAMETER OutputPath
 Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
@@ -25,9 +26,6 @@ Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 
 .PARAMETER ExportCsv
 Also write the full result set to a CSV next to the HTML report.
-
-.PARAMETER IncludeSpending
-Reserved. Accepted for compatibility but currently has no effect (no cost data is collected).
 
 .PARAMETER SkipAzConnect
 Use the existing Az session instead of calling Connect-AzAccount.
@@ -43,7 +41,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Resources modules
 Permissions:  Azure RBAC Reader on each subscription to be included
 When to use:  First look at an unfamiliar tenant, to size an engagement, or to find empty or disabled subscriptions.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -54,8 +52,6 @@ param(
     [string]$CustomerName,
 
     [switch]$ExportCsv,
-
-    [switch]$IncludeSpending,
 
     [switch]$SkipAzConnect
 )
@@ -123,7 +119,15 @@ if (-not $SkipAzConnect) {
     Connect-ToAzure
 }
 
-$Subscriptions = Get-AzSubscription -ErrorAction Stop
+$Subscriptions = @(Get-AzSubscription -ErrorAction Stop)
+if ($SubscriptionIds) {
+    foreach ($RequestedId in $SubscriptionIds) {
+        if (-not ($Subscriptions | Where-Object { $_.Id -eq $RequestedId })) {
+            Write-Log "Subscription $RequestedId was not found or is not visible to this account." 'WARN'
+        }
+    }
+    $Subscriptions = @($Subscriptions | Where-Object { $SubscriptionIds -contains $_.Id })
+}
 $SubCount = ($Subscriptions | Measure-Object).Count
 
 Write-Log "Found $SubCount subscriptions."
@@ -197,7 +201,7 @@ $HtmlRows = $Results | Sort-Object TotalResources -Descending | ForEach-Object {
         <td>$($_.TotalResources)</td>
         <td>$($_.VMs)</td>
         <td>$($_.StorageAccounts)</td>
-        <td>$($_.VMs)</td>
+        <td>$($_.SQLServers)</td>
         <td>$($_.ResourceGroups)</td>
         <td>$($_.Owners)</td>
         <td>$($_.Contributors)</td>
