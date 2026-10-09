@@ -14,7 +14,8 @@ policies and Named Locations (GUIDs are resolved to names), and writes three fil
   - a findings CSV with risk findings from six rules: disabled policy, report-only policy, no MFA or
     authentication strength, All Users with no exclusions, overly broad conditions, and no device
     compliance or hybrid join requirement.
-A summary is printed to the console. This script is read-only.
+A summary is printed to the console. This script is read-only. On a fatal error it logs the error and returns;
+when run non-interactively (powershell -File or -NonInteractive) it also sets exit code 1.
 
 .PARAMETER OutputPath
 Folder for the report files. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
@@ -39,7 +40,7 @@ Platform:     Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK)
 Permissions:  Graph scope Policy.Read.All (Security Reader, Global Reader or Conditional Access Administrator)
 When to use:  Security assessment of a new tenant, or before and after changing Conditional Access to find gaps such as missing MFA or lockout risk.
 Safety:       Read-only
-Version:      2.1
+Version:      2.2
 #>
 
 [CmdletBinding()]
@@ -76,6 +77,9 @@ function Write-Log {
 $stamp          = Get-Date -Format 'yyyyMMdd_HHmmss'
 $outDir         = Resolve-OutputPath -Path $OutputPath -CustomerName $CustomerName
 $script:LogFile = Join-Path $outDir "Get-ConditionalAccessReport_$stamp.log"
+
+# Only set an exit code when launched as a process (-File / -NonInteractive); 'exit' would close an interactive host.
+$IsNonInteractive = @([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-(File|f|NonInteractive)$' }).Count -gt 0
 
 #region -- Module Preflight --------------------------------------------------
 
@@ -552,7 +556,7 @@ try {
 
     if ($rawPolicies.Count -eq 0) {
         Write-Log "No Conditional Access policies found in this tenant." -Level WARN
-        exit 0
+        return
     }
 
     # -- Step 6: Export full raw objects to JSON (deep, unmodified) ----------
@@ -605,7 +609,8 @@ try {
 catch {
     Write-Log "FATAL: $($_.Exception.Message)" -Level ERROR
     Write-Log "Stack trace: $($_.ScriptStackTrace)" -Level ERROR
-    exit 1
+    if ($IsNonInteractive) { exit 1 }
+    return
 }
 finally {
     # Disconnect only if this script established the connection.
