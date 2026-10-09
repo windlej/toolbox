@@ -8,7 +8,7 @@ Runs health checks against every domain controller and writes an HTML report.
 .DESCRIPTION
 For each domain controller (all DCs in the domain, or those given in -DomainControllers) the script checks
 connectivity (ping), the Netlogon service, dcdiag results (unless -SkipDcdiag), replication status via
-repadmin /showrepl (unless -SkipReplication), NTP source via w32tm and FSMO role holders. The HTML report
+repadmin /showrepl (unless -SkipReplication), NTP source via w32tm. FSMO role holders are domain/forest-wide, so they are reported once (as a "(domain)" row) rather than per DC. The HTML report
 shows the domain and forest mode, the DC list, summary counts and one row per check coloured by Pass, Warn or
 Fail. Requires dcdiag, repadmin and w32tm on the machine running the script (installed with the AD DS RSAT tools).
 
@@ -75,7 +75,6 @@ $htmlPath = Join-Path $outDir "Test-DomainHealth_$stamp.html"
 $script:LogFile = Join-Path $outDir "Test-DomainHealth_$stamp.log"
 
 $Results = @()
-$Issues = @()
 
 function Invoke-DcdiagCheck {
     param([string]$Server)
@@ -91,9 +90,10 @@ function Invoke-DcdiagCheck {
         Details     = ""
     }
 
-    if ($dcdiagOutput -match "failed|error|warning") {
+    $Hits = @($dcdiagOutput -match "failed|error|warning")
+    if ($Hits.Count -gt 0) {
         $Parsed.Status = "Fail"
-        $Parsed.Details = ($dcdiagOutput | Select-String -Pattern "failed|error|warning" -SimpleMatch | Out-String).Trim()
+        $Parsed.Details = (($Hits | ForEach-Object { "$_".Trim() }) -join "; ")
     }
 
     return $Parsed
@@ -158,7 +158,7 @@ function Test-NtpSync {
     try {
         $w32tm = w32tm /query /computer:$Server /status 2>&1
         if ($w32tm -match "Source:|NtpServer|Reference Identifier") {
-            $Source = ($w32tm | Select-String -Pattern "Source:" | ForEach-Object { $_ -replace ".*Source:\s*", "" }).Trim()
+            $Source = (@($w32tm | Select-String -Pattern "Source:" | ForEach-Object { ("$_" -replace ".*Source:\s*", "").Trim() }) -join ", ")
             return [PSCustomObject]@{
                 Server  = $Server
                 Check   = "NTP Sync"
@@ -184,20 +184,19 @@ function Test-NtpSync {
 }
 
 function Test-FsmoRoles {
-    param([string]$Server)
+    # FSMO roles are domain/forest-wide, so they are checked once rather than per DC.
+    param($Domain, $Forest)
 
     try {
-        $Roles = Get-ADDomain | Select-Object -ExpandProperty PDCEmulator,
-            RIDMaster, InfrastructureMaster, SchemaMaster, DomainNamingMaster
         return [PSCustomObject]@{
-            Server  = $Server
+            Server  = "(domain)"
             Check   = "FSMO Roles"
             Status  = "Pass"
-            Details = "PDC: $($Roles[0]), RID: $($Roles[1]), Infra: $($Roles[2]), Schema: $($Roles[3]), Domain: $($Roles[4])"
+            Details = "PDC: $($Domain.PDCEmulator), RID: $($Domain.RIDMaster), Infra: $($Domain.InfrastructureMaster), Schema: $($Forest.SchemaMaster), Domain naming: $($Forest.DomainNamingMaster)"
         }
     } catch {
         return [PSCustomObject]@{
-            Server  = $Server
+            Server  = "(domain)"
             Check   = "FSMO Roles"
             Status  = "Fail"
             Details = $_.Exception.Message
@@ -244,8 +243,9 @@ foreach ($DC in $DomainControllers) {
     }
 
     $Results += Test-NtpSync $DC
-    $Results += Test-FsmoRoles $DC
 }
+
+$Results += Test-FsmoRoles -Domain $DomainInfo -Forest $ForestInfo
 
 $Failures = @($Results | Where-Object { $_.Status -eq "Fail" -or $_.Status -eq "Unhealthy" })
 $Warnings = @($Results | Where-Object { $_.Status -eq "Warn" })
