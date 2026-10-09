@@ -8,7 +8,7 @@ Creates Exchange Online shared mailboxes in bulk from a CSV and optionally grant
 Reads a CSV with the columns DisplayName, Alias, Domain, Users and Department (Users may hold several delegates
 separated by ';'; Department is optional). For each row it creates a shared mailbox <Alias>@<Domain> with New-Mailbox
 (delegates are also set as SendOnBehalf). Optional switches then grant each delegate FullAccess (with automapping),
-SendAs, and/or add them as members of a distribution group named after the mailbox. -HideFromGAL hides the new
+SendAs, and/or add them as members of the existing distribution group <Alias>-Members. -HideFromGAL hides the new
 mailbox from address lists.
 
 Nothing is changed unless the script is run for real; use -WhatIf to preview every create/grant without making
@@ -25,7 +25,8 @@ Folder for the report and log. Falls back to $env:TOOLBOX_REPORT_DIR, then promp
 Optional. Adds a <OutputPath>\<CustomerName> subfolder.
 
 .PARAMETER AddUsersAsMembers
-Add each delegate as a member of a distribution group with the same identity as the mailbox.
+Add each delegate as a member of the existing distribution group named <Alias>-Members (a group cannot share the
+mailbox's own alias or address). The group is not created; if it does not exist the add is recorded as Failed.
 
 .PARAMETER GrantFullAccess
 Grant each delegate FullAccess (automapping on) on the new mailbox.
@@ -50,7 +51,7 @@ Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
 Permissions:  Exchange Online roles Mail Recipient Creation and Mail Recipients (New-Mailbox, Set-Mailbox, Add-MailboxPermission, Add-RecipientPermission); Distribution Groups if -AddUsersAsMembers
 When to use:  Provisioning many shared mailboxes at once, for example during onboarding or a tenant migration.
 Safety:       Changes data (supports -WhatIf)
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -140,7 +141,8 @@ function New-SharedMailbox {
             PrimarySmtpAddress    = $UPN
         }
 
-        if ($CsvRow.Users) { $MailboxParams.GrantSendOnBehalfTo = $CsvRow.Users }
+        $Delegates = @("$($CsvRow.Users)" -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($Delegates.Count -gt 0) { $MailboxParams.GrantSendOnBehalfTo = $Delegates }
         if ($CsvRow.Department) { $MailboxParams.Office = $CsvRow.Department }
 
         $Mailbox = New-Mailbox @MailboxParams -ErrorAction Stop
@@ -201,11 +203,18 @@ function Add-UserToSharedMailbox {
         }
 
         if ($AddUsersAsMembers) {
-            if ($PSCmdlet.ShouldProcess($Mailbox, "Add $User as distribution group member")) {
+            $GroupName = '{0}-Members' -f ($Mailbox -split '@')[0]
+            if (-not $PSCmdlet.ShouldProcess($GroupName, "Add $User as distribution group member")) {
+                Write-Result -Mailbox $Mailbox -Action "AddGroupMember" -Status "WhatIf" -Detail "$User -> $GroupName"
+            }
+            else {
                 try {
-                    Add-DistributionGroupMember -Identity $Mailbox -Member $User -ErrorAction SilentlyContinue
+                    Add-DistributionGroupMember -Identity $GroupName -Member $User -ErrorAction Stop
+                    Write-Result -Mailbox $Mailbox -Action "AddGroupMember" -Status "Success" -Detail "$User -> $GroupName"
+                    Write-Log "    $User added to group $GroupName"
                 } catch {
-                    Write-Log "    Could not add $User to group $Mailbox : $_" 'WARN'
+                    Write-Result -Mailbox $Mailbox -Action "AddGroupMember" -Status "Failed" -Detail "$User -> $GroupName : $_"
+                    Write-Log "    Could not add $User to group $GroupName : $_" 'WARN'
                 }
             }
         }
