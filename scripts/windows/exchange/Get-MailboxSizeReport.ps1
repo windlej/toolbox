@@ -11,6 +11,8 @@ Critical against -WarningSizeGB and -CriticalSizeGB based on the primary mailbox
 
 Output is an HTML report (primary, largest 500 mailboxes shown, Warning/Critical rows highlighted), an optional
 CSV with every mailbox (-ExportCsv) and a log file, all in the output folder. The script does not change anything.
+It reports sizes at the time of the run only; Exchange Online keeps no size history, so growth is not calculated
+(compare the CSVs from two runs to see growth).
 
 .PARAMETER UserPrincipalNames
 Optional list of mailboxes (UPNs) to check. If neither this nor -CsvPath is given, all mailboxes are checked.
@@ -29,12 +31,6 @@ Also write all mailbox rows to a CSV next to the HTML report.
 
 .PARAMETER IncludeArchive
 Also collect archive mailbox size and item count for mailboxes with an active archive.
-
-.PARAMETER ShowGrowth
-Reserved. Accepted for compatibility but not used by the current report.
-
-.PARAMETER TopGrowthDays
-Reserved. Accepted for compatibility but not used by the current report.
 
 .PARAMETER WarningSizeGB
 Primary mailbox size in GB at or above which a mailbox is rated Warning. Default 50.
@@ -56,7 +52,7 @@ Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
 Permissions:  Exchange Online role View-Only Recipients (Get-Mailbox) and View-Only Recipients or Mail Recipients (Get-MailboxStatistics)
 When to use:  Capacity planning, finding mailboxes near quota, or sizing a migration or archive rollout.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -66,8 +62,6 @@ param(
     [string]$CustomerName,
     [switch]$ExportCsv,
     [switch]$IncludeArchive,
-    [switch]$ShowGrowth,
-    [int]$TopGrowthDays = 30,
     [int]$WarningSizeGB = 50,
     [int]$CriticalSizeGB = 80,
     [switch]$SkipExchangeConnect
@@ -248,7 +242,7 @@ td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
 .warning td { background: #fff3cd; }
 </style></head>
 <body>
-<h1>Mailbox Size & Growth Report</h1>
+<h1>Mailbox Size Report</h1>
 <div class='summary'>
     <strong>Mailboxes:</strong> $TotalMailboxes |
     <strong>Total Storage:</strong> $([math]::Round($TotalStorage, 0)) GB |
