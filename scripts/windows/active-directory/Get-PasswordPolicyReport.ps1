@@ -8,8 +8,9 @@ Reports the domain password policy and, optionally, per-user password compliance
 .DESCRIPTION
 Reads the default domain password policy and any fine-grained password policies and lists them in an HTML report.
 With -AuditUsers it also evaluates every user (enabled only unless -IncludeDisabledUsers) and classifies each
-password as OK, WARNING, CRITICAL, EXPIRED or NEVER_EXPIRES based on the days until expiry and the thresholds
--PasswordAgeWarningDays / -PasswordAgeCriticalDays. The user table shows name, account, status, last set and expiry
+password as OK, WARNING, CRITICAL, EXPIRED, NEVER_EXPIRES or NO_EXPIRY_DATE based on the days until expiry and the
+thresholds -PasswordAgeWarningDays / -PasswordAgeCriticalDays. NO_EXPIRY_DATE means no expiry could be computed
+(for example no password-last-set value or no maximum password age) and is not treated as expired. The user table shows name, account, status, last set and expiry
 dates and lockout state; no password data is read. -ExportCsv writes the per-user results (only with -AuditUsers).
 
 .PARAMETER OutputPath
@@ -25,11 +26,12 @@ Also write a CSV of the per-user results. Only has an effect together with -Audi
 Include the per-user password compliance audit (list of named user accounts). Without it only the policy is reported.
 
 .PARAMETER PasswordAgeWarningDays
-Users whose password expires within this many days are marked WARNING. Default 30.
+Users whose password expires within this many days (but not within the critical window) are marked WARNING.
+Default 30. Must be greater than -PasswordAgeCriticalDays.
 
 .PARAMETER PasswordAgeCriticalDays
-Users whose password expires within this many days are marked CRITICAL. Default 60 (should be lower than the
-warning value for sensible results; the critical check runs first).
+Users whose password expires within this many days are marked CRITICAL. Default 7. Must be lower than
+-PasswordAgeWarningDays, otherwise the script stops with an error.
 
 .PARAMETER IncludeDisabledUsers
 Include disabled accounts in the user audit.
@@ -45,7 +47,7 @@ Platform:     Windows (RSAT ActiveDirectory module, domain-joined machine)
 Permissions:  Read-only domain user (fine-grained policy objects may need Domain Admin to read)
 When to use:  Security assessments, audit evidence for password policy, or finding accounts with expired or never-expiring passwords.
 Safety:       Read-only
-Version:      1.0
+Version:      1.1
 #>
 [CmdletBinding()]
 param(
@@ -53,13 +55,19 @@ param(
     [string]$CustomerName,
     [switch]$ExportCsv,
     [switch]$AuditUsers,
+    [ValidateRange(1, 3650)]
     [int]$PasswordAgeWarningDays = 30,
-    [int]$PasswordAgeCriticalDays = 60,
+    [ValidateRange(0, 3650)]
+    [int]$PasswordAgeCriticalDays = 7,
     [switch]$IncludeDisabledUsers
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($PasswordAgeCriticalDays -ge $PasswordAgeWarningDays) {
+    throw "-PasswordAgeCriticalDays ($PasswordAgeCriticalDays) must be lower than -PasswordAgeWarningDays ($PasswordAgeWarningDays); both count days until expiry."
+}
 
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
@@ -145,6 +153,7 @@ if ($AuditUsers) {
         $PasswordStatus = "OK"
         if ($User.PasswordNeverExpires) { $PasswordStatus = "NEVER_EXPIRES" }
         elseif ($User.PasswordExpired) { $PasswordStatus = "EXPIRED" }
+        elseif ($null -eq $DaysUntilExpiry) { $PasswordStatus = "NO_EXPIRY_DATE" }
         elseif ($DaysUntilExpiry -le 0) { $PasswordStatus = "EXPIRED" }
         elseif ($DaysUntilExpiry -le $PasswordAgeCriticalDays) { $PasswordStatus = "CRITICAL" }
         elseif ($DaysUntilExpiry -le $PasswordAgeWarningDays) { $PasswordStatus = "WARNING" }
@@ -173,13 +182,15 @@ if ($AuditUsers) {
     $NeverExpires = @($UserResults | Where-Object { $_.PasswordNeverExpires }).Count
     $CriticalPasswords = @($UserResults | Where-Object { $_.PasswordStatus -eq "CRITICAL" }).Count
     $WarningPasswords = @($UserResults | Where-Object { $_.PasswordStatus -eq "WARNING" }).Count
+    $NoExpiryDate = @($UserResults | Where-Object { $_.PasswordStatus -eq "NO_EXPIRY_DATE" }).Count
 
     Write-Log "Audited $TotalUsers users"
-    Write-Log "  Password OK: $($TotalUsers - $ExpiredPasswords - $NeverExpires - $CriticalPasswords - $WarningPasswords)"
+    Write-Log "  Password OK: $($TotalUsers - $ExpiredPasswords - $NeverExpires - $CriticalPasswords - $WarningPasswords - $NoExpiryDate)"
     Write-Log "  Warning: $WarningPasswords"
     Write-Log "  Critical: $CriticalPasswords"
     Write-Log "  Expired: $ExpiredPasswords" 'WARN'
     Write-Log "  Never Expires: $NeverExpires" 'WARN'
+    Write-Log "  No Expiry Date: $NoExpiryDate"
 }
 
 $HtmlPolicyRows = @"
@@ -253,11 +264,12 @@ $(if ($AuditUsers) {
 <h2>User Password Compliance</h2>
 <div class='summary'>
     <strong>Total Users:</strong> $TotalUsers |
-    <strong>OK:</strong> $($TotalUsers - $ExpiredPasswords - $NeverExpires - $CriticalPasswords - $WarningPasswords) |
+    <strong>OK:</strong> $($TotalUsers - $ExpiredPasswords - $NeverExpires - $CriticalPasswords - $WarningPasswords - $NoExpiryDate) |
     <strong>Warning:</strong> $WarningPasswords |
     <strong>Critical:</strong> $CriticalPasswords |
     <strong>Expired:</strong> $ExpiredPasswords |
-    <strong>Never Expires:</strong> $NeverExpires
+    <strong>Never Expires:</strong> $NeverExpires |
+    <strong>No Expiry Date:</strong> $NoExpiryDate
 </div>
 <table>
 <tr>
