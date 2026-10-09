@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+
+# Reports and script output must live outside the repo (see docs/DESIGN-GUIDE.md)
+Reports/
+output/
+*.log
+
+# Customer-specific data must never be committed
+customers/
+*.csv
+*.xlsx
+privileged_baseline.xml
+
+# Allow sample/template CSVs explicitly named *.sample.csv
+!*.sample.csv
