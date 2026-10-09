@@ -52,4 +52,18 @@ Old script names (before the restructure) and where they live now. Update schedu
 
 ## Imported from admin-scripts
 
-(filled in when the import commit lands)
+| Original (admin-scripts) | New path | Notes |
+|---|---|---|
+| `helpful-scripts/ExportADUsers.ps1` | `scripts/windows/active-directory/Export-ADUserReport.ps1` | Writes CSV to `-OutputPath` instead of stdout. |
+| `helpful-scripts/adpermaudit.ps1` | `scripts/windows/active-directory/Compare-ADUserGroupMembership.ps1` | Menu replaced by parameters; `-Recursive` now resolves nested groups. |
+| `helpful-scripts/adusercomputeraudit.ps1` | `scripts/windows/active-directory/Get-ADUserLogonComputer.ps1` | CSV export; `-GridView` optional. |
+| `helpful-scripts/serverfinder.ps1` | `scripts/windows/active-directory/Export-ADServerList.ps1` | |
+| `helpful-scripts/office_version_search.ps1` | `scripts/windows/endpoint/Get-OfficeVersionInventory.ps1` | Original was truncated mid-statement and could not run. |
+| `helpful-scripts/concat_autopilot_hash.ps1` | `scripts/windows/endpoint/Merge-AutopilotHashCsv.ps1` | |
+| `helpful-scripts/diskaudit.ps1` | `scripts/windows/server/Get-DiskUsageAudit.ps1` | Menu replaced by parameters. Replaces `diskdriveusage.ps1` and the four `better_disk_cleanup` variants. |
+| `helpful-scripts/sqlservicemon.ps1` | `scripts/windows/server/Start-SqlServiceMonitor.ps1` | Log folder is now `-OutputPath`. |
+| `helpful-scripts/securitybaseline.ps1` | `scripts/windows/m365/Invoke-M365SecurityBaseline.ps1` | Customer name, domain and output folder are parameters. |
+| `ssh-check.sh` | `scripts/network/ssh-check.sh` | Examples sanitized. |
+| `better_disk_cleanup/random_file_gen.ps1` | `tools/New-TestFileSet.ps1` | Dev tool. |
+
+Not imported (left in the old folder on purpose): `ssh-config-setup.sh`, `detect if domain is gcc.txt`, `time_tracker4.0.bat`, `diskdriveusage.ps1`, `fullfqdn.ps1`, `better_disk_cleanup/{chatgpt,claude,copilot,perplexity}.ps1`, `Reports/*.csv`, `New Text Document.txt`.
