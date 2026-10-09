@@ -25,9 +25,6 @@ Also write the license inventory to a CSV next to the HTML report.
 .PARAMETER InactiveThresholdDays
 Days without a sign-in after which a license holder is considered inactive. Default 90.
 
-.PARAMETER ShowUnlicensedUsers
-Reserved. Currently has no effect on the output.
-
 .PARAMETER SkipGraphConnect
 Skip Connect-MgGraph (use when a Graph session with suitable scopes already exists).
 
@@ -42,7 +39,7 @@ Platform:     Windows (PowerShell 5.1+ with Microsoft Graph PowerShell SDK)
 Permissions:  Graph scopes Organization.Read.All, User.Read.All, AuditLog.Read.All, Directory.Read.All (Global Reader or License Administrator)
 When to use:  Before a license true-up or renewal, or to find paid licenses held by users who no longer sign in.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -53,8 +50,6 @@ param(
     [switch]$ExportCsv,
 
     [int]$InactiveThresholdDays = 90,
-
-    [switch]$ShowUnlicensedUsers,
 
     [switch]$SkipGraphConnect
 )
