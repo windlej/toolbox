@@ -10,9 +10,7 @@ Recursively enumerates the user members of a list of privileged groups (Domain A
 Schema Admins, Administrators and others by default) and writes an HTML report with each member's enabled state,
 title, department, password and logon dates, flagging disabled accounts and accounts whose password never expires.
 -UpdateBaseline saves the current membership to a baseline XML file; -CompareWithBaseline loads that file and
-lists members who were Added or Removed since it was taken. -AlertEmailTo sends the change list by e-mail
-through the SMTP server given in -SmtpServer, from the address in -From; no alert is sent unless -AlertEmailTo,
--From and -SmtpServer are all provided (the script stops at start-up if -AlertEmailTo is given without the other two).
+lists members who were Added or Removed since it was taken.
 Active Directory is never modified; the only things written are the report, the log and, with -UpdateBaseline,
 the baseline file.
 
@@ -42,24 +40,11 @@ When combined with -CompareWithBaseline, the comparison runs against the old bas
 .PARAMETER CompareWithBaseline
 Compare current membership with the baseline file and report Added/Removed members.
 
-.PARAMETER AlertEmailTo
-Optional recipients for an e-mail alert when changes are detected. Requires -From and -SmtpServer. Supports -WhatIf.
-
-.PARAMETER From
-Sender address for the alert e-mail (for example alerts@contoso.com). Required with -AlertEmailTo.
-
-.PARAMETER SmtpServer
-SMTP server used for the alert e-mail. Required with -AlertEmailTo; there is no default. The mail is sent
-unauthenticated and without TLS, so use an internal relay that accepts it.
-
-.PARAMETER SmtpPort
-SMTP port used for the alert e-mail. Default 25.
-
 .EXAMPLE
 .\Get-PrivilegedGroupChange.ps1 -UpdateBaseline -OutputPath D:\Reports -CustomerName Contoso
 
 .EXAMPLE
-.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -OutputPath D:\Reports -CustomerName Contoso -AlertEmailTo secops@contoso.com -From alerts@contoso.com -SmtpServer smtp.contoso.com
+.\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -OutputPath D:\Reports -CustomerName Contoso
 
 .EXAMPLE
 .\Get-PrivilegedGroupChange.ps1 -CompareWithBaseline -UpdateBaseline -OutputPath D:\Reports -CustomerName Contoso
@@ -92,19 +77,11 @@ param(
     ),
     [string]$BaselinePath,
     [switch]$UpdateBaseline,
-    [switch]$CompareWithBaseline,
-    [string[]]$AlertEmailTo,
-    [string]$From,
-    [string]$SmtpServer,
-    [int]$SmtpPort = 25
+    [switch]$CompareWithBaseline
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-if ($AlertEmailTo -and (-not $From -or -not $SmtpServer)) {
-    throw '-AlertEmailTo requires both -From and -SmtpServer.'
-}
 
 function Resolve-OutputPath {
     param([string]$Path, [string]$CustomerName)
@@ -351,27 +328,3 @@ $($HtmlRows -join "`n")
 
 $Html | Out-File -LiteralPath $htmlPath -Encoding UTF8 -WhatIf:$false
 Write-Log "Report: $htmlPath"
-
-if ($Changes.Count -gt 0 -and $AlertEmailTo) {
-    try {
-        $Body = "Privileged account changes detected: $($Changes.Count) changes found.`n`n"
-        $Body += ($Changes | ForEach-Object { "$($_.Type): $($_.Detail)" }) -join "`n"
-        if ($PSCmdlet.ShouldProcess(($AlertEmailTo -join ', '), 'Send privileged group change alert e-mail')) {
-            $Message = New-Object System.Net.Mail.MailMessage
-            $Smtp = New-Object System.Net.Mail.SmtpClient($SmtpServer, $SmtpPort)
-            try {
-                $Message.From = New-Object System.Net.Mail.MailAddress($From)
-                foreach ($Recipient in $AlertEmailTo) { $Message.To.Add($Recipient) }
-                $Message.Subject = "[ALERT] Privileged Account Changes Detected"
-                $Message.Body = $Body
-                $Smtp.Send($Message)
-            } finally {
-                $Message.Dispose()
-                $Smtp.Dispose()
-            }
-            Write-Log "Alert sent to $($AlertEmailTo -join ', ')"
-        }
-    } catch {
-        Write-Log "Failed to send alert: $($_.Exception.Message)" 'WARN'
-    }
-}
