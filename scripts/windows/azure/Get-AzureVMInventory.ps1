@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-#Requires -Modules Az.Accounts, Az.Compute
+#Requires -Modules Az.Accounts, Az.Compute, Az.Network
 
 <#
 .SYNOPSIS
@@ -7,10 +7,12 @@ Inventories Azure virtual machines across subscriptions with an estimated monthl
 
 .DESCRIPTION
 For each accessible subscription (or the ones you list) the script reads every VM with its power state and
-records name, resource group, region, size, OS type, attached managed disk size, tags and the NIC reference.
-Cost is an ESTIMATE only: it uses a small built-in pay-as-you-go rate card (USD per month) for common sizes
-and a rough per-core guess for others; deallocated or stopped VMs are costed at zero. It does not read actual
-billing data.
+records name, resource group, region, size, OS type, attached managed disk size, tags and the private IP
+address(es) of its network interfaces (looked up from the NICs; blank if the NICs cannot be read).
+Cost is an ESTIMATE only, and is labelled that way in the report and CSV (EstimatedMonthlyCostUSD,
+EstimatedAnnualCostUSD): it uses a small hardcoded pay-as-you-go rate card (USD per month, not region specific)
+for common sizes and a rough per-core guess for others; deallocated or stopped VMs are costed at zero. The rates
+are illustrative and will drift from current Azure pricing. It does not read actual billing data.
 
 Output is an HTML report (primary) sorted by estimated cost with running/stopped/OS totals, plus an optional CSV
 with all columns. The script makes no changes to Azure.
@@ -37,11 +39,11 @@ Use the existing Az session instead of calling Connect-AzAccount.
 .\Get-AzureVMInventory.ps1 -SubscriptionIds 00000000-0000-0000-0000-000000000000 -ExportCsv -CustomerName Contoso -OutputPath D:\Reports
 
 .NOTES
-Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Compute modules)
+Platform:     Windows (PowerShell 5.1+ with Az.Accounts, Az.Compute and Az.Network modules)
 Permissions:  Azure RBAC Reader on each subscription being scanned
 When to use:  Cloud estate discovery, right-sizing conversations, or finding stopped-but-not-deallocated VMs before a cost review.
 Safety:       Read-only
-Version:      1.1
+Version:      1.2
 #>
 [CmdletBinding()]
 param(
@@ -94,7 +96,7 @@ function Connect-ToAzure {
 }
 
 function Get-VMCostEstimate {
-    param([string]$VMSize, [string]$Region, [bool]$Running)
+    param([string]$VMSize, [bool]$Running)
 
     $RateCard = @{
         'Standard_B1s' = 9.49; 'Standard_B2s' = 37.96; 'Standard_B2ms' = 75.92
@@ -159,6 +161,15 @@ foreach ($SubId in $SubscriptionIds) {
 
     Write-Log "  Subscription: $SubName ($SubId)"
 
+    $NicById = @{}
+    try {
+        foreach ($Nic in @(Get-AzNetworkInterface -ErrorAction Stop)) {
+            $NicById[$Nic.Id.ToLowerInvariant()] = $Nic
+        }
+    } catch {
+        Write-Log "Could not read network interfaces in ${SubName}; PrivateIP will be blank: $_" 'WARN'
+    }
+
     try {
         $VMs = Get-AzVM -Status -ErrorAction Stop
     } catch {
@@ -168,13 +179,17 @@ foreach ($SubId in $SubscriptionIds) {
 
     foreach ($VM in $VMs) {
         $Running = $VM.PowerState -eq "VM running"
-        $MonthlyCost = Get-VMCostEstimate -VMSize $VM.HardwareProfile.VmSize -Region $VM.Location -Running $Running
+        $MonthlyCost = Get-VMCostEstimate -VMSize $VM.HardwareProfile.VmSize -Running $Running
         $AnnualCost = $MonthlyCost * 12
 
         $Disks = Get-AzDisk -ResourceGroupName $VM.ResourceGroupName -ErrorAction SilentlyContinue |
             Where-Object { $_.ManagedBy -match $VM.Id }
         $DiskSizeGB = ($Disks | Measure-Object -Property DiskSizeGB -Sum).Sum
         $OsType = $VM.StorageProfile.OsDisk.OsType
+        $PrivateIps = @(foreach ($VmNic in @($VM.NetworkProfile.NetworkInterfaces)) {
+            $Nic = $NicById[([string]$VmNic.Id).ToLowerInvariant()]
+            if ($Nic) { $Nic.IpConfigurations | ForEach-Object { $_.PrivateIpAddress } }
+        })
         $Tags = if ($VM.Tags) { ($VM.Tags.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; ' } else { "" }
 
         $AllVMs.Add([PSCustomObject]@{
@@ -187,10 +202,10 @@ foreach ($SubId in $SubscriptionIds) {
             PowerState        = $VM.PowerState
             OsType            = $OsType
             DiskSizeGB        = $DiskSizeGB
-            PrivateIP         = ($VM.NetworkProfile.NetworkInterfaces.Primary -join '; ')
+            PrivateIP         = ($PrivateIps -join '; ')
             Tags              = $Tags
-            MonthlyCostUSD    = $MonthlyCost
-            AnnualCostUSD     = $AnnualCost
+            EstimatedMonthlyCostUSD = $MonthlyCost
+            EstimatedAnnualCostUSD  = $AnnualCost
             Running           = $Running
         })
     }
@@ -199,15 +214,15 @@ foreach ($SubId in $SubscriptionIds) {
 $TotalVMs = $AllVMs.Count
 $RunningCount = @($AllVMs | Where-Object { $_.Running }).Count
 $StoppedCount = @($AllVMs | Where-Object { -not $_.Running }).Count
-$TotalMonthlyCost = ($AllVMs | Measure-Object -Property MonthlyCostUSD -Sum).Sum
-$TotalAnnualCost = ($AllVMs | Measure-Object -Property AnnualCostUSD -Sum).Sum
+$TotalMonthlyCost = ($AllVMs | Measure-Object -Property EstimatedMonthlyCostUSD -Sum).Sum
+$TotalAnnualCost = ($AllVMs | Measure-Object -Property EstimatedAnnualCostUSD -Sum).Sum
 $WindowsCount = @($AllVMs | Where-Object { $_.OsType -eq "Windows" }).Count
 $LinuxCount = @($AllVMs | Where-Object { $_.OsType -eq "Linux" }).Count
 
 Write-Log "Summary: Total VMs $TotalVMs | Running $RunningCount | Stopped $StoppedCount | Windows $WindowsCount | Linux $LinuxCount"
 Write-Log "Estimated cost: Monthly `$$([math]::Round($TotalMonthlyCost, 2)) | Annual `$$([math]::Round($TotalAnnualCost, 2))"
 
-$HtmlRows = $AllVMs | Sort-Object MonthlyCostUSD -Descending | ForEach-Object {
+$HtmlRows = $AllVMs | Sort-Object EstimatedMonthlyCostUSD -Descending | ForEach-Object {
     $RowClass = if (-not $_.Running) { "stopped" } else { "" }
     "<tr class='$RowClass'>
         <td>$($_.Name)</td>
@@ -217,8 +232,8 @@ $HtmlRows = $AllVMs | Sort-Object MonthlyCostUSD -Descending | ForEach-Object {
         <td>$($_.VMSize)</td>
         <td>$($_.PowerState)</td>
         <td>$($_.OsType)</td>
-        <td>`$$($_.MonthlyCostUSD)</td>
-        <td>`$$($_.AnnualCostUSD)</td>
+        <td>`$$($_.EstimatedMonthlyCostUSD)</td>
+        <td>`$$($_.EstimatedAnnualCostUSD)</td>
     </tr>"
 }
 
@@ -243,11 +258,12 @@ td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
     <strong>Stopped:</strong> $StoppedCount |
     <strong>Windows:</strong> $WindowsCount |
     <strong>Linux:</strong> $LinuxCount |
-    <strong>Monthly:</strong> `$$([math]::Round($TotalMonthlyCost, 2)) |
-    <strong>Annual:</strong> `$$([math]::Round($TotalAnnualCost, 2))
+    <strong>Est. Monthly:</strong> `$$([math]::Round($TotalMonthlyCost, 2)) |
+    <strong>Est. Annual:</strong> `$$([math]::Round($TotalAnnualCost, 2))
 </div>
+<p><em>Costs are estimates from a hardcoded pay-as-you-go rate card (not region specific, not actual billing data).</em></p>
 <table>
-<tr><th>VM Name</th><th>Subscription</th><th>RG</th><th>Region</th><th>Size</th><th>State</th><th>OS</th><th>Monthly</th><th>Annual</th></tr>
+<tr><th>VM Name</th><th>Subscription</th><th>RG</th><th>Region</th><th>Size</th><th>State</th><th>OS</th><th>Est. Monthly (USD)</th><th>Est. Annual (USD)</th></tr>
 $($HtmlRows -join "`n")
 </table>
 </body></html>
