@@ -37,9 +37,6 @@ Also write the raw check results to a CSV next to the HTML report.
 .PARAMETER InstallMissingModules
 Install Microsoft.Graph and ExchangeOnlineManagement for the current user if missing.
 
-.PARAMETER SkipSharePointChecks
-Reserved for the SharePoint-related checks. Currently has no effect (no SharePoint checks are implemented).
-
 .EXAMPLE
 .\Invoke-M365SecurityBaseline.ps1 -CustomerName Contoso -PrimaryDomain contoso.com -OutputPath D:\Reports
 
@@ -48,10 +45,10 @@ Reserved for the SharePoint-related checks. Currently has no effect (no SharePoi
 
 .NOTES
 Platform:     Windows (PowerShell 5.1 or 7+)
-Permissions:  Global Reader or Security Reader in the tenant (consent to the Graph scopes Directory.Read.All, Policy.Read.All, Reports.Read.All, Security.Read.All, AuditLog.Read.All, UserAuthenticationMethod.Read.All at sign-in), plus Exchange Online View-Only roles (View-Only Configuration and View-Only Recipients) and, for the CIS DLP check, Compliance Center view-only access
+Permissions:  Global Reader or Security Reader in the tenant (consent to the Graph scopes Directory.Read.All, Policy.Read.All, Reports.Read.All, Security.Read.All, SecurityEvents.Read.All, AuditLog.Read.All, UserAuthenticationMethod.Read.All at sign-in), plus Exchange Online View-Only roles (View-Only Configuration and View-Only Recipients) and, for the CIS DLP check, Compliance Center view-only access
 When to use:  Onboarding a new customer, an annual security review, or before and after a remediation project.
 Safety:       Read-only
-Version:      2.2
+Version:      2.3
 #>
 [CmdletBinding()]
 param(
@@ -63,8 +60,7 @@ param(
     [string]$OutputPath,
 
     [switch]$ExportCsv,
-    [switch]$InstallMissingModules,
-    [switch]$SkipSharePointChecks
+    [switch]$InstallMissingModules
 )
 
 Set-StrictMode -Version Latest
@@ -137,6 +133,7 @@ function Connect-Services {
         'Policy.Read.All',
         'Reports.Read.All',
         'Security.Read.All',
+        'SecurityEvents.Read.All',
         'AuditLog.Read.All',
         'UserAuthenticationMethod.Read.All'
 
