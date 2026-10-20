@@ -106,7 +106,6 @@ function Test-ReplicationHealth {
     $ErrorActionPreference = 'Continue'
 
     $repadminOutput = repadmin /showrepl $Server 2>&1
-    $LastSuccess = $repadminOutput | Select-String -Pattern "last success"
     $LastFailure = $repadminOutput | Select-String -Pattern "last failure"
 
     $Status = "Healthy"

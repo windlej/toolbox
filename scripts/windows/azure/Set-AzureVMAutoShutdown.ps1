@@ -123,7 +123,7 @@ function Get-ExistingAutoShutdown {
                 TimeZone = $Properties.timeZoneId
             }
         }
-    } catch { }
+    } catch { Write-Log "Could not read the existing auto-shutdown schedule for ${VMId}: $_" 'WARN' }
     return $null
 }
 

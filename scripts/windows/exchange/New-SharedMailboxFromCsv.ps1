@@ -145,7 +145,7 @@ function New-SharedMailbox {
         if ($Delegates.Count -gt 0) { $MailboxParams.GrantSendOnBehalfTo = $Delegates }
         if ($CsvRow.Department) { $MailboxParams.Office = $CsvRow.Department }
 
-        $Mailbox = New-Mailbox @MailboxParams -ErrorAction Stop
+        New-Mailbox @MailboxParams -ErrorAction Stop | Out-Null
 
         if ($HideFromGAL) {
             Set-Mailbox -Identity $UPN -HiddenFromAddressListsEnabled $true -ErrorAction SilentlyContinue
