@@ -4,6 +4,7 @@
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell)](https://github.com/PowerShell/PowerShell)
 [![Graph SDK](https://img.shields.io/badge/Microsoft.Graph-Identity.SignIns-0078d4?logo=microsoft)](https://learn.microsoft.com/en-us/powershell/microsoftgraph/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Graph Version](https://img.shields.io/badge/Graph%20API-v1.0-orange)](https://learn.microsoft.com/en-us/graph/overview)
 
 ---
@@ -21,6 +22,7 @@
 - [Example Output](#-example-output)
 - [FAQ](#-faq)
 - [Contributing](#-contributing)
+- [License](#-license)
 
 ---
 
@@ -247,6 +249,12 @@ Please ensure any new rules include:
 - A severity classification (`High` / `Medium` / `Low`)
 - A clear `Finding` string
 - An actionable `Recommendation` string
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
 
 ---
 

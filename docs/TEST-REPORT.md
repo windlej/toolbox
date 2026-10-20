@@ -98,7 +98,7 @@ By script, the top six: `Get-EventLogAnomaly` 32, `Invoke-M365SecurityBaseline` 
 | P2-2 `-Location` | Also a helper argument (`Set-AutoShutdownSchedule`), not a script parameter. Now passed to `New-AzResource` (a DevTestLab schedule needs a location) | `cdbff50` |
 | P2-2 `-MaxRuleReportLength` | Removed. It was documented as reserved, and truncating rule detail in a security report would hide evidence | `5892272` |
 | P2-3 SqlServiceMonitor wording | Help reworded; Event Log write kept and described as an Error entry; in-code `ALERT` prefix changed to `FAILED` | `a604866` |
-| P2-4 broken LICENSE link | MIT badge, TOC entry and License section removed. No license was chosen; add a `LICENSE` file and restore them if wanted | `726672f` |
+| P2-4 broken LICENSE link | Added an MIT `LICENSE` (copyright Jeremiah Windle, 2026) at the repo root; badge and License section kept | see PR |
 | P3-2 `Version:` label | `Test-ScriptStandards` now requires it | `1dec50e` |
 | P3-3 WhatIf/Verbose `.PARAMETER` | Removed from `Get-DiskSpaceStatus` | `943209d` |
 | P3-5 "(1 scripts)" | Gone after the picker rewrite; the launcher shows `(1)` per category | n/a |
