@@ -244,6 +244,27 @@ Rules for whoever picks one up: read `docs/DESIGN-GUIDE.md` first, fix only that
 - **Verify:** read-through; confirm a failure produces a Failed row while the Create row stays Success.
 - **Severity:** Low
 
+### BUG-038: Invoke-UserOffboarding requests Graph scopes the code does not use
+- **File:** `scripts/windows/m365/Invoke-UserOffboarding.ps1` (`Connect-ToGraph`)
+- **Symptom:** `Directory.ReadWrite.All` and `MailboxSettings.ReadWrite` are still requested. Mailbox changes go through Exchange Online cmdlets, and the Graph calls used (`Update-MgUser`, `Set-MgUserLicense`, `Revoke-MgUserSignInSession`) need only `User.ReadWrite.All`. Over-broad consent on a destructive script.
+- **Suggested fix:** Drop `MailboxSettings.ReadWrite`, and test whether `Directory.ReadWrite.All` is needed (for example when disabling users who hold admin roles) before removing it. Update the `Permissions:` header line.
+- **Verify:** lab tenant; run the block, revoke and license steps against a normal user and an admin-role user with only the reduced scopes.
+- **Severity:** Low
+
+### BUG-039: Get-PrivilegedRoleReport reports non-user directory role members as Unknown users
+- **File:** `scripts/windows/m365/Get-PrivilegedRoleReport.ps1` (`Get-DirectoryRoleMembers`)
+- **Symptom:** Members that are groups or service principals fail `Get-MgUser` (hidden by `-ErrorAction SilentlyContinue`) and appear as rows with `UserPrincipalName = 'Unknown'`. The unified-role path filters to users, so the two sources disagree, and the users-only summary counts include the Unknown rows.
+- **Suggested fix:** Skip members whose `@odata.type` is not `#microsoft.graph.user`, or report them with their real type. Log a WARN when a user lookup fails.
+- **Verify:** lab tenant with a role-assignable group and a service principal in a role; confirm no Unknown rows.
+- **Severity:** Low (misleading report)
+
+### BUG-040: Get-ConditionalAccessReport interactive detection is a heuristic
+- **File:** `scripts/windows/m365/Get-ConditionalAccessReport.ps1` (`$IsNonInteractive`)
+- **Symptom:** Non-interactive mode is inferred from `[Environment]::GetCommandLineArgs()` containing `-File`, `-f` or `-NonInteractive`. A host that runs the script another way (`-Command`, a scheduler wrapper, an IDE) gets no exit code. Not tested on Windows PowerShell 5.1 versus 7.
+- **Suggested fix:** Confirm the argument values on both editions and add `-Command` if it should count as non-interactive.
+- **Verify:** `powershell -File` and `pwsh -File` with a forced failure return exit code 1; running from an open console session stays open.
+- **Severity:** Low
+
 ## Fixed
 
 _Historical: the rows below are kept as a record. The e-mail alerting they mention (`-AlertEmailTo`, `-From`, `-SmtpServer`, `SmtpClient`) was later removed from these scripts because they are only run ad hoc._

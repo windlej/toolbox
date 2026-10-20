@@ -77,6 +77,13 @@ foreach ($file in $files) {
     }
     $text = Get-Content -LiteralPath $file.FullName -Raw
 
+    # Encoding: Windows PowerShell 5.1 reads BOM-less files as ANSI, which corrupts or breaks non-ASCII characters.
+    $bytes = [IO.File]::ReadAllBytes($file.FullName)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    if (-not $hasBom -and ($bytes | Where-Object { $_ -gt 127 } | Select-Object -First 1)) {
+        Add-Finding 'ERROR' $rel 'Contains non-ASCII characters but no UTF-8 BOM; Windows PowerShell 5.1 may fail to parse it. Save with BOM or use ASCII.'
+    }
+
     # Help header
     $help = $ast.GetHelpContent()
     if (-not $help -or [string]::IsNullOrWhiteSpace($help.Synopsis)) {
