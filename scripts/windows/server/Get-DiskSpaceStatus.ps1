@@ -40,14 +40,6 @@
 .PARAMETER EventLogName
     Event Log to write into. Default: Application.
 
-.PARAMETER WhatIf
-    Dry-run mode (standard PowerShell switch). No Event Log entries are written
-    and the history CSV is not appended, but all disk checks and console/log output are
-    performed.
-
-.PARAMETER Verbose
-    Enables verbose output for detailed execution tracing.
-
 .EXAMPLE
     .\Get-DiskSpaceStatus.ps1 -OutputPath D:\Reports
 
