@@ -3,15 +3,14 @@
 
 <#
 .SYNOPSIS
-    Ensures all SQL Server services are running. Retries for 30 seconds and alerts if any fail to start.
+    Ensures all SQL Server services are running. Retries for 30 seconds and logs an error for any that fail to start.
 
 .DESCRIPTION
     Discovers all SQL Server-related services, attempts to start any that are stopped,
-    polls every 5 seconds for up to 30 seconds, and writes an alert to the Event Log
-    for any service that fails to reach a Running state in time.
+    polls every 5 seconds for up to 30 seconds, and writes an Error entry to the Event Log
+    (and the log file) for any service that fails to reach a Running state in time.
 
-    Exit code 0 means every SQL service is running; 1 means at least one failed to start, which
-    makes it suitable for a scheduled task or RMM monitor.
+    Exit code 0 means every SQL service is running; 1 means at least one failed to start.
 
 .PARAMETER TimeoutSeconds
     How long (in seconds) to wait for each service to reach Running state. Default: 30.
@@ -24,7 +23,6 @@
 
 .PARAMETER OutputPath
     Folder for the daily log file. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
-    Scheduled runs must pass -OutputPath, because there is no one to answer the prompt.
 
 .PARAMETER CustomerName
     Optional. Adds a <OutputPath>\<CustomerName> subfolder.
@@ -38,9 +36,9 @@
 .NOTES
     Platform:     Windows (SQL Server host)
     Permissions:  Local administrator (writes to the Application event log, source SQLServiceMonitor)
-    When to use:  After patching or reboots, or as a scheduled task, to bring SQL services back up and raise an alert if they won't start.
+    When to use:  After patching or reboots, to bring SQL services back up and log an error for any that won't start.
     Safety:       Changes data (starts stopped services; supports -WhatIf)
-    Version:      1.1
+    Version:      1.2
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -193,7 +191,7 @@ function Start-SqlService {
         Write-EventLogEntry -Message "SQL service started successfully: $displayName ($name)" -EntryType Information
         return $true
     } else {
-        $msg = "ALERT — '$displayName' ($name) did NOT reach Running state within $TimeoutSeconds seconds."
+        $msg = "FAILED — '$displayName' ($name) did NOT reach Running state within $TimeoutSeconds seconds."
         Write-Log $msg -Level ERROR
         Write-EventLogEntry -Message $msg -EntryType Error
 

@@ -135,7 +135,6 @@ function Get-PermissionReport {
     } else { $null }
 
     $Owner = $Acl.Owner
-    $InheritanceEnabled = (-not $Acl.AreAccessRulesProtected)
 
     $Permissions = foreach ($Access in $Acl.Access) {
         if (-not $IncludeInherited -and $Access.IsInherited) { continue }
@@ -243,8 +242,6 @@ $HtmlRows = $AllPermissions | Sort-Object Path | ForEach-Object {
     elseif ($_.Rights -match "FullControl") { "fullcontrol" }
     elseif ($_.IsInherited) { "inherited" }
     else { "" }
-
-    $DepthIndent = "&nbsp;" * ($_.Depth * 2)
 
     "<tr class='$RowClass'>
         <td>$($_.Path)</td>

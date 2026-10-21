@@ -38,9 +38,6 @@ flagged separately and do not need a keyword.
 .PARAMETER SuspiciousDomains
 Optional list of domains; rules forwarding or redirecting to any of them are flagged.
 
-.PARAMETER MaxRuleReportLength
-Reserved. Accepted for compatibility but not used by the current report.
-
 .PARAMETER ReportAllRules
 Report every inbox rule found, not just the suspicious ones.
 
@@ -58,7 +55,7 @@ Platform:     Windows (ExchangeOnlineManagement module, Exchange Online)
 Permissions:  Exchange Online roles View-Only Recipients and Mail Recipients (Get-InboxRule reads other users' rules)
 When to use:  After a phishing or business-email-compromise incident, or as a periodic sweep for attacker-created inbox rules.
 Safety:       Read-only
-Version:      1.2
+Version:      1.3
 #>
 [CmdletBinding()]
 param(
@@ -73,7 +70,6 @@ param(
         "forwarding", "email forwarding"
     ),
     [string[]]$SuspiciousDomains,
-    [int]$MaxRuleReportLength = 5000,
     [switch]$ReportAllRules,
     [switch]$SkipExchangeConnect
 )

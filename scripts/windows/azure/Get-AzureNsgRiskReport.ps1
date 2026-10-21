@@ -18,6 +18,12 @@ With -FlagHighRiskOnly only rules rated above Low are included. The script makes
 .PARAMETER SubscriptionIds
 Optional list of subscription ids to scan. Default: every subscription the signed-in account can see.
 
+.PARAMETER NSGName
+Optional. Only scan NSGs whose name matches this value. Wildcards are allowed (for example web-*).
+
+.PARAMETER ResourceGroup
+Optional. Only scan NSGs in this resource group (exact name).
+
 .PARAMETER OutputPath
 Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts.
 
@@ -47,11 +53,15 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts and Az.Network modules)
 Permissions:  Azure RBAC Reader on each subscription being scanned
 When to use:  Security review of a new customer tenant, before a pen test, or to find RDP/SSH/any-any rules open to the Internet.
 Safety:       Read-only
-Version:      1.2
+Version:      1.3
 #>
 [CmdletBinding()]
 param(
     [string[]]$SubscriptionIds,
+
+    [string]$NSGName,
+
+    [string]$ResourceGroup,
 
     [string]$OutputPath,
 
@@ -107,9 +117,7 @@ function Connect-ToAzure {
 function Test-RuleRisk {
     param(
         [PSObject]$Rule,
-        [string]$Direction,
-        [string]$NSGName,
-        [string]$ResourceGroup
+        [string]$Direction
     )
 
     $Flags = @()
@@ -161,7 +169,10 @@ foreach ($SubId in $SubscriptionIds) {
     Write-Log "Scanning NSGs in: $SubName"
 
     try {
-        $NSGs = Get-AzNetworkSecurityGroup -ErrorAction Stop
+        $NsgQuery = @{ ErrorAction = 'Stop' }
+        if ($ResourceGroup) { $NsgQuery.ResourceGroupName = $ResourceGroup }
+        $NSGs = @(Get-AzNetworkSecurityGroup @NsgQuery)
+        if ($NSGName) { $NSGs = @($NSGs | Where-Object { $_.Name -like $NSGName }) }
     } catch {
         Write-Log "Could not list NSGs in ${SubName}: $_" 'WARN'
         continue
@@ -176,7 +187,7 @@ foreach ($SubId in $SubscriptionIds) {
 
         foreach ($Rule in $Rules) {
             if ($FlagHighRiskOnly) {
-                $Analysis = Test-RuleRisk -Rule $Rule -Direction $Rule.Direction -NSGName $NSG.Name -ResourceGroup $NSG.ResourceGroupName
+                $Analysis = Test-RuleRisk -Rule $Rule -Direction $Rule.Direction
                 if ($Analysis.Risk -ne "Low") {
                     $HighRiskRules.Add([PSCustomObject]@{
                         Subscription         = $SubName
@@ -197,7 +208,7 @@ foreach ($SubId in $SubscriptionIds) {
                     })
                 }
             } else {
-                $Analysis = Test-RuleRisk -Rule $Rule -Direction $Rule.Direction -NSGName $NSG.Name -ResourceGroup $NSG.ResourceGroupName
+                $Analysis = Test-RuleRisk -Rule $Rule -Direction $Rule.Direction
                 $Results.Add([PSCustomObject]@{
                     Subscription         = $SubName
                     ResourceGroup        = $NSG.ResourceGroupName

@@ -31,6 +31,8 @@ With -FlagHighRiskOnly only rules rated above Low are included. The script makes
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `-SubscriptionIds` | String[] | No | Optional list of subscription ids to scan. Default: every subscription the signed-in account can see. |
+| `-NSGName` | String | No | Optional. Only scan NSGs whose name matches this value. Wildcards are allowed (for example web-*). |
+| `-ResourceGroup` | String | No | Optional. Only scan NSGs in this resource group (exact name). |
 | `-OutputPath` | String | No | Folder for the report. Falls back to $env:TOOLBOX_REPORT_DIR, then prompts. |
 | `-CustomerName` | String | No | Optional. Adds a &lt;OutputPath&gt;\&lt;CustomerName&gt; subfolder. |
 | `-ExportCsv` | SwitchParameter | No | Also write the findings to a CSV next to the HTML report. |

@@ -51,7 +51,7 @@ Platform:     Windows (PowerShell 5.1+ with Az.Accounts, Az.Resources and Az.Com
 Permissions:  Azure RBAC Reader to audit; Contributor (or Virtual Machine Contributor) on the VMs when using -ApplySchedules
 When to use:  Cost control for dev/test subscriptions where VMs are left running overnight; run read-only first, then apply with -WhatIf before the real run.
 Safety:       Changes data (supports -WhatIf)
-Version:      1.2
+Version:      1.3
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -123,7 +123,7 @@ function Get-ExistingAutoShutdown {
                 TimeZone = $Properties.timeZoneId
             }
         }
-    } catch { }
+    } catch { Write-Log "Could not read the existing auto-shutdown schedule for ${VMId}: $_" 'WARN' }
     return $null
 }
 
@@ -151,6 +151,7 @@ function Set-AutoShutdownSchedule {
             ResourceId = "$VMId/providers/Microsoft.DevTestLab/schedules/shutdown-computevm"
             Properties = $ShutdownProperties
             ApiVersion = '2017-04-26-preview'
+            Location = $Location
             Force = $true
             ErrorAction = 'Stop'
         }

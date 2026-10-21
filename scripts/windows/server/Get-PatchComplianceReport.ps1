@@ -214,8 +214,6 @@ $HtmlRows = $AllResults | Sort-Object Compliance, ComputerName | ForEach-Object 
         default { "" }
     }
 
-    $RebootBadge = if ($_.PendingReboot) { "<span style='color:red;'>[REBOOT]</span>" } else { "" }
-
     "<tr class='$RowClass'>
         <td>$($_.ComputerName)</td>
         <td>$($_.Compliance)</td>

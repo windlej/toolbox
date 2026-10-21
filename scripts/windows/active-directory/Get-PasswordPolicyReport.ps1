@@ -95,7 +95,6 @@ $script:LogFile = Join-Path $outDir "Get-PasswordPolicyReport_$stamp.log"
 Import-Module ActiveDirectory -ErrorAction Stop
 
 $Domain = Get-ADDomain
-$DomainDN = $Domain.DistinguishedName
 
 $DefaultPolicy = Get-ADDefaultDomainPasswordPolicy
 $FineGrainedPolicies = Get-ADFineGrainedPasswordPolicy -ErrorAction SilentlyContinue

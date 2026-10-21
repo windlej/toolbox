@@ -89,6 +89,23 @@ By script, the top six: `Get-EventLogAnomaly` 32, `Invoke-M365SecurityBaseline` 
 
 **P3-5. Banner grammar.** `toolbox.ps1` prints "(1 scripts)" for the Network and Security categories.
 
+### Resolution status (branch `fix/test-report-p2-p3`)
+
+| Item | Status | Commit |
+|---|---|---|
+| P2-1 launcher hangs at EOF | Already fixed by the picker rewrite (`8384fe9`). `Show-NumberedPicker` returns on a blank or `$null` answer; `pwsh dist/toolbox.ps1 < /dev/null` exits 0 within the 20 s alarm. The generated `toolbox.ps1` is not tracked (`dist/` is in `.gitignore`). No change made | n/a |
+| P2-2 `-NSGName`, `-ResourceGroup` | Implemented as script-level filters (name wildcard, exact resource group). The report's "parameters" were actually unused arguments of the `Test-RuleRisk` helper, which no longer takes them | `2ae42f0`, `deb910a` |
+| P2-2 `-Location` | Also a helper argument (`Set-AutoShutdownSchedule`), not a script parameter. Now passed to `New-AzResource` (a DevTestLab schedule needs a location) | `cdbff50` |
+| P2-2 `-MaxRuleReportLength` | Removed. It was documented as reserved, and truncating rule detail in a security report would hide evidence | `5892272` |
+| P2-3 SqlServiceMonitor wording | Help reworded; Event Log write kept and described as an Error entry; in-code `ALERT` prefix changed to `FAILED` | `a604866` |
+| P2-4 broken LICENSE link | Added an MIT `LICENSE` (copyright Jeremiah Windle, 2026) at the repo root; badge and License section kept | see PR |
+| P3-2 `Version:` label | `Test-ScriptStandards` now requires it | `1dec50e` |
+| P3-3 WhatIf/Verbose `.PARAMETER` | Removed from `Get-DiskSpaceStatus` | `943209d` |
+| P3-5 "(1 scripts)" | Gone after the picker rewrite; the launcher shows `(1)` per category | n/a |
+| Dead variables, empty catch blocks | Removed `Mailbox`, `NewUser`, `InheritanceEnabled`, `DepthIndent`, `RebootBadge`, `LastSuccess`, `DomainDN`. `SPFPresent`, `SPFRecord` and `MailPlatform` are **not** dead (set inside `ForEach-Object`, read later) and were kept; the analyzer still flags them. Empty catches now log WARN or a verbose message | `8459ff8` |
+
+P3-1 and P3-4 were left alone on purpose.
+
 ### Customer-data scan (step 7)
 
 - **Terms:** `whmc`, `othello`, `whitman`, `10.111`, `162.248`, `172.25`, `172.27`, `JeremiahWindle`: **0 hits** in the working tree, in commit messages, and in the content of every commit on every branch (`git log --all -G`). I also searched `jeremiah` and `windle` case-insensitively: 0 hits.

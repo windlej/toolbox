@@ -38,7 +38,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $approvedVerbs = (Get-Verb).Verb
-$requiredNotes = 'Platform:', 'Permissions:', 'When to use:', 'Safety:'
+$requiredNotes = 'Platform:', 'Permissions:', 'When to use:', 'Safety:', 'Version:'
 $writesFiles   = 'Export-Csv|Out-File|Set-Content|Add-Content|Export-Clixml|Export-Excel|\.Save\('
 
 # Patterns that suggest customer or environment data baked into a script.

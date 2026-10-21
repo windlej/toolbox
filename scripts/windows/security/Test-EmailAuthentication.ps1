@@ -118,7 +118,7 @@ try {
                     elseif ($txt -match "_spf\.google\.com") { $MailPlatform = "Google Workspace" }
                 }
             }
-        } catch {}
+        } catch { Write-Verbose "No SPF TXT record for ${Domain}: $_" }
 
         # ---------------- DMARC + POLICY + RUA ----------------
         $DMARCPresent = "No"
@@ -147,7 +147,7 @@ try {
                     $RuaStatus = "Invalid format"
                 }
             }
-        } catch {}
+        } catch { Write-Verbose "No DMARC record for ${Domain}: $_" }
 
         # ---------------- DKIM AUTO SELECTORS ----------------
         switch ($MailPlatform) {
@@ -161,7 +161,7 @@ try {
             try {
                 Resolve-DnsName "$sel._domainkey.$Domain" -Type TXT -ErrorAction Stop | Out-Null
                 $DKIMFound += $sel
-            } catch {}
+            } catch { Write-Verbose "No DKIM record at $sel._domainkey.$Domain" }
         }
 
         $DKIMPresent = if ($DKIMFound) { "Yes" } else { "No" }

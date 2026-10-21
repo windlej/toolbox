@@ -205,7 +205,7 @@ function New-CloudUser {
     }
 
     try {
-        $NewUser = New-MgUser @UserParams -ErrorAction Stop
+        New-MgUser @UserParams -ErrorAction Stop | Out-Null
         Write-Result -User $UserPrincipalName -Action 'CreateUser' -Status 'Success' -Detail 'User created'
         Write-Log "Created user: $UserPrincipalName"
         return @{
